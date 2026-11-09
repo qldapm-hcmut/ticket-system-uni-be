@@ -9,6 +9,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
+	adminhttp "github.com/qldapm-hcmut/ticket-system-uni/internal/admin/adapter/http"
+	adminpg "github.com/qldapm-hcmut/ticket-system-uni/internal/admin/adapter/postgres"
+	adminapp "github.com/qldapm-hcmut/ticket-system-uni/internal/admin/application"
 	googleauth "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/adapter/google"
 	authhttp "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/adapter/http"
 	authpg "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/adapter/postgres"
@@ -65,6 +68,7 @@ func registerAuth(lc fx.Lifecycle, e *echo.Echo, pool *pgxpool.Pool) error {
 		service := application.NewService(authpg.NewUnitOfWork(pool), verifier, tokens, kernel.SystemClock{})
 		authHandler := authhttp.New(service, tokens, authpg.NewProfileReader(pool))
 		authHandler.Register(e)
+		adminhttp.New(adminapp.New(adminpg.New(pool))).Register(e, authHandler.Authenticate)
 		notifhttp.New(notifapp.New(notifpg.New(pool))).Register(e, authHandler.Authenticate)
 		eventStore := eventpg.New(pool)
 		eventReader := eventpg.NewReader(pool, kernel.SystemClock{})

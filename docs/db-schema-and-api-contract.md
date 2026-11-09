@@ -298,6 +298,7 @@ Các action ghi vào `activity_logs`. Vai trò của một user được đọc 
 | `CANCEL_ON_BEHALF` | REGISTRATION | Có | `{ "reason", "studentId" }` |
 | `MANUAL_CHECKIN`, `UNDO_CHECKIN` | REGISTRATION | Có | `{ "note", "previousCheckedInAt" }` |
 | `EXPORT_DATA` | EVENT | Có | `{ "kind", "format", "rowCount" }` |
+| `CREATE_UNIT` | UNIT | Không | `{ "before": null, "after": { "code", "name", "type", "isActive" } }` |
 | `UPDATE_USER`, `SET_UNIT_MEMBERS` | USER, UNIT | Không | `{ "before", "after" }` |
 | `GRANT_ADMIN`, `REVOKE_ADMIN` | USER | Không | `{ "ticket" }` (ghi bởi quy trình nội bộ của đội dev) |
 
@@ -424,6 +425,17 @@ Frontend lấy ID token qua Google Identity Services; gửi qua HTTPS tới back
 Định danh bằng `google_sub` (`sub` của Google). Lần đầu: nếu email có trong danh sách import thì liên kết vào tài khoản đó (có MSSV → là STUDENT); nếu không thì tạo user mới với `student_code = NULL`, `is_admin = false`, chưa có vai trò nào. User seed chưa có sub được liên kết theo email đã xác minh trong transaction. Không liên kết nếu email đã gắn sub khác; unique email/sub bảo vệ đăng nhập song song. Không tự cấp vai trò; không nhận MSSV hay `isAdmin` từ client. Admin đầu tiên seed email thật, không có mật khẩu. Không lưu token Google; refresh/logout dùng session nội bộ, không đăng xuất Google. Không log ID token, access token hay refresh token.
 
 Lỗi: `401 UNAUTHENTICATED` (token sai/hết hạn, sai audience/domain/hd, email chưa xác minh, xung đột liên kết hoặc `isActive = false`). JWT payload: `sub`, `exp`. Vai trò (MSSV, `is_admin`, đơn vị được giao) không nhét vào token mà tra DB mỗi request để đổi quyền có hiệu lực ngay. Response trả `roles` là mảng suy ra, ví dụ `["STUDENT","ORGANIZER"]`, để frontend hiển thị menu.
+
+### 5.1a Quản trị đơn vị và người dùng (U2–U5)
+
+Các API `/admin/*` yêu cầu tài khoản active có `is_admin = true`, không yêu cầu membership đơn vị. Quyền được kiểm tra lại từ DB; API không cấp `is_admin` hoặc MSSV.
+
+- **U2:** tạo đơn vị với code/name không rỗng, giới hạn lần lượt 30/200 ký tự và type FACULTY/CLUB/DEPARTMENT. Trùng code trả `409 INVALID_STATE_TRANSITION`. Ghi `CREATE_UNIT` cùng transaction.
+- **U3:** PUT thay toàn bộ danh sách Organizer trong một transaction, khóa dòng đơn vị kể cả khi danh sách cũ rỗng. `members: []` xóa toàn bộ membership; thiếu/null, trùng userId hoặc role khác ORGANIZER trả `400 VALIDATION_ERROR`. Unit/user không tồn tại trả `404 NOT_FOUND`. Ghi `SET_UNIT_MEMBERS` với before/after chỉ gồm userId/memberRole; audit lỗi rollback cả thay đổi.
+- **U4:** tìm literal không phân biệt hoa thường theo tên/email/MSSV, lọc một role suy ra (các role được chồng lấn). Sắp fullName rồi id; count, page và membership đọc cùng snapshot. Bao gồm tài khoản inactive để Admin có thể mở lại. Query phân trang/role sai trả `400 VALIDATION_ERROR`.
+- **U5:** body chỉ nhận boolean `isActive`, bắt buộc có giá trị; field khác bị từ chối, không âm thầm bỏ qua. Response vẫn trả user khi vừa bị khóa; không đổi MSSV, Admin hay membership. Ghi `UPDATE_USER` before/after isActive cùng transaction. Tài khoản bị khóa hoặc bị thu hồi quyền được phản ánh ở request xác thực tiếp theo.
+
+Các mutation không dùng event_id cho audit đơn vị/user; response dữ liệu quản trị có `Cache-Control: no-store`. Chi tiết request/response theo OpenAPI.
 
 ### 5.2 Events
 
