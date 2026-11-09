@@ -4,7 +4,7 @@ Schema thực thi chuẩn nằm trong `db/migrations/`, theo baseline 24/10/2026
 
 - `migrations/0001_initial_schema.up.sql`: initial schema 8 bảng, dùng cho database mới.
 - `migrations/0001_initial_schema.down.sql`: rollback initial schema, phá hủy dữ liệu nghiệp vụ; chỉ dùng trên DB thử nghiệm hoặc sau khi đã có kế hoạch sao lưu.
-- `queries/auth.sql`: query nền tảng user, liên kết Google identity và đọc quyền; chưa phải use case auth hoàn chỉnh.
+- `queries/auth.sql`, `queries/sessions.sql`: SQL nguồn cho user, liên kết Google identity, quyền và session; use case xác thực nằm trong `internal/auth/`.
 - `../sqlc.yaml`, `../internal/db/`: cấu hình và code sinh bằng sqlc v1.30.0, pgx/v5.
 - `seed/seed.sql`: bootstrap đơn vị CSE và email Admin do người vận hành cung cấp; chạy lại không tự nâng quyền user đã tồn tại.
 
@@ -46,4 +46,4 @@ Seed không nhận Google sub, không seed MSSV demo vào DB thật. Nếu email
 - User chưa có MSSV không có vai trò STUDENT; không tự cấp quyền khi đăng nhập Google.
 - Admin được cấp/thu hồi bởi quy trình nội bộ có audit, không qua API công khai.
 
-Chưa có import MSSV, query session, integration test use case/concurrency hay email jobs. Migration và seed cơ bản đã kiểm chứng trên PostgreSQL thật; chưa có test cho toàn bộ tình huống import/auth và concurrency nghiệp vụ.
+Import MSSV và email dispatcher chưa được triển khai. Test schema nằm trong `db/schema_integration_test.go`; test persistence/use case và concurrency hiện có nằm trong `internal/*/adapter/postgres/*_integration_test.go`. Sự hiện diện của test không thay thế việc chạy lại và đối chiếu độ bao phủ với contract.
