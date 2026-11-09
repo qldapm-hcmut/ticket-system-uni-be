@@ -209,7 +209,9 @@ paths:
     post:
       tags: [Units & Users]
       operationId: createUnit
-      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+      description: |
+        Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+        Trùng code trả 409 INVALID_STATE_TRANSITION.
       summary: U2 — Tạo đơn vị (Admin)
       requestBody:
         required: true
@@ -235,7 +237,10 @@ paths:
     put:
       tags: [Units & Users]
       operationId: setUnitMembers
-      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+      description: |
+        Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+        Thay thế nguyên tử; members rỗng xóa toàn bộ membership của đơn vị.
+        Không chấp nhận userId trùng; unit hoặc user tham chiếu không tồn tại trả 404 NOT_FOUND.
       summary: U3 — Gán Organizer cho đơn vị (Admin cấp trường), thay thế toàn bộ danh sách
       parameters:
         - $ref: '#/components/parameters/UnitId'
@@ -245,12 +250,15 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               required: [members]
               properties:
                 members:
                   type: array
+                  uniqueItems: true
                   items:
                     type: object
+                    additionalProperties: false
                     required: [userId, memberRole]
                     properties:
                       userId: { type: string, format: uuid }
@@ -302,6 +310,7 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/User' }
                   meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
@@ -319,7 +328,8 @@ paths:
           application/json:
             schema:
               type: object
-              minProperties: 1
+              additionalProperties: false
+              required: [isActive]
               properties:
                 isActive: { type: boolean }
       responses:
@@ -1368,10 +1378,11 @@ components:
             isActive: { type: boolean }
     UnitCreate:
       type: object
+      additionalProperties: false
       required: [code, name, type]
       properties:
-        code: { type: string, maxLength: 30 }
-        name: { type: string, maxLength: 200 }
+        code: { type: string, minLength: 1, maxLength: 30 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         type: { $ref: '#/components/schemas/UnitType' }
     UnitMember:
       type: object

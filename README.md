@@ -57,9 +57,21 @@ Kiến trúc chia theo module, áp dụng Clean Architecture có chọn lọc v�
 
 Cần Go theo `go.mod`, Make và Podman với Compose provider (`podman compose`). Các lệnh database/code generation cần thêm CLI `migrate`, `sqlc` và `psql`; hướng dẫn tại [`db/README.md`](db/README.md).
 
+| Biến | API | Worker | Quy tắc |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | Bắt buộc | Bắt buộc | Kết nối PostgreSQL; không có mặc định ở ứng dụng |
+| `HTTP_ADDR` | Tùy chọn | Được kiểm tra bởi config dùng chung | Mặc định `:3000`, định dạng `host:port`; worker không mở HTTP |
+| `GOOGLE_CLIENT_ID` | Bắt buộc | Không dùng | Google OAuth client ID, không có khoảng trắng đầu/cuối |
+| `JWT_SECRET` | Bắt buộc | Không dùng | Khóa ký token, ít nhất 32 byte không tính khoảng trắng đầu/cuối |
+| `QR_HMAC_SECRET` | Bắt buộc | Không dùng | Khóa ký QR độc lập, ít nhất 32 byte không tính khoảng trắng đầu/cuối |
+
+`POSTGRES_PASSWORD` và `POSTGRES_PORT` dành cho Compose local; giữ chúng đồng bộ với `DATABASE_URL`. Tạo hai khóa độc lập bằng cách chạy `openssl rand -hex 32` hai lần rồi điền từng kết quả vào `.env`. Ứng dụng dùng chuỗi khóa nguyên văn, không giải mã hex/base64. Dùng giá trị không có khoảng trắng, không bọc dấu nháy để phù hợp cách Make nạp file. Không dùng các khóa mẫu chung.
+
+Với Google, cấu hình OAuth consent screen/audience và OAuth client cho frontend (thường là Web application), khai báo authorized JavaScript origins thực tế. Điền client ID vào `GOOGLE_CLIENT_ID`, không phải client secret. Frontend gửi Google **ID token** đến `POST /api/v1/auth/google`; tài khoản phải có email xác minh thuộc `hcmut.edu.vn` và claim `hd=hcmut.edu.vn`. Luồng này không yêu cầu Google client secret hay callback URL ở backend. API cần kết nối HTTPS ra Google cho OIDC discovery lúc khởi động và lấy signing keys khi xác minh.
+
 ```sh
 cp .env.example .env
-# Điều chỉnh cấu hình local trong .env
+# Điền GOOGLE_CLIENT_ID, JWT_SECRET, QR_HMAC_SECRET và cấu hình DB local trước khi chạy API.
 make db-up
 make migrate-up
 make run

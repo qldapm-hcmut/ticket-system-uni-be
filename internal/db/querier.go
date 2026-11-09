@@ -11,6 +11,17 @@ import (
 )
 
 type Querier interface {
+	AdminActor(ctx context.Context, id pgtype.UUID) (bool, error)
+	AdminCountUsers(ctx context.Context, arg AdminCountUsersParams) (int64, error)
+	AdminCreateUnit(ctx context.Context, arg AdminCreateUnitParams) (Unit, error)
+	AdminDeleteUnitMembers(ctx context.Context, unitID pgtype.UUID) error
+	AdminInsertActivity(ctx context.Context, arg AdminInsertActivityParams) error
+	AdminInsertUnitMember(ctx context.Context, arg AdminInsertUnitMemberParams) error
+	AdminListUnitMembers(ctx context.Context, unitID pgtype.UUID) ([]AdminListUnitMembersRow, error)
+	AdminListUsers(ctx context.Context, arg AdminListUsersParams) ([]User, error)
+	AdminLockUnit(ctx context.Context, id pgtype.UUID) (Unit, error)
+	AdminLockUser(ctx context.Context, id pgtype.UUID) (User, error)
+	AdminUpdateUserActive(ctx context.Context, arg AdminUpdateUserActiveParams) (User, error)
 	ApproveEvent(ctx context.Context, arg ApproveEventParams) (Event, error)
 	AuditApprovalAction(ctx context.Context, arg AuditApprovalActionParams) error
 	AuditEventCancellation(ctx context.Context, arg AuditEventCancellationParams) error
