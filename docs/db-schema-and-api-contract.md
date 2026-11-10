@@ -537,7 +537,9 @@ Lỗi: `409 ALREADY_REGISTERED` (kèm `details.registrationId`), `409 EVENT_FULL
 **R2 `POST /registrations/{registrationId}/cancel`** — `{ "reason": "..." }` (tùy chọn với sinh viên, bắt buộc khi Organizer hủy hộ).
 
 - Sinh viên chủ sở hữu: được hủy REGISTERED nếu `now < startAt − 24h` HOẶC `now < startAt AND now < cancellation_exception_until`; nếu không → `422 CANCEL_DEADLINE_PASSED` (Q13 + Q19). Chỉ các dòng hiện hữu trước thay đổi quan trọng trong 24h cuối mới có ngoại lệ. Rời waitlist không bị chặn bởi hạn 24h nhưng chỉ trước `startAt`; từ `startAt` có trạng thái hiệu lực EXPIRED.
-- Organizer của đơn vị: hủy hộ bất kỳ lúc nào trước `startAt`, ghi `activity_logs`. Nếu registration là của chính Organizer đó thì xử lý như sinh viên tự hủy (áp hạn 24h, `cancelledBy = STUDENT`), không dùng quyền hủy hộ.
+- Organizer của đơn vị: hủy hộ bất kỳ lúc nào trước `startAt`, ghi `activity_logs`. REGISTERED từ `startAt` trả `422 CANCEL_DEADLINE_PASSED`. Nếu registration là của chính Organizer đó thì xử lý như sinh viên tự hủy (áp hạn 24h, `cancelledBy = STUDENT`), không dùng quyền hủy hộ; chủ sở hữu không còn Student (không MSSV) trả `403 FORBIDDEN` dù có Organizer/Admin.
+- `reason` phải là string UTF-8 không chứa NUL, tối đa 255 ký tự trên **input gốc**, kể cả khoảng trắng (theo OpenAPI `maxLength`); sai trả `400 VALIDATION_ERROR`. Sau validation mới trim để lưu; hủy hộ bắt buộc không rỗng sau trim, tự hủy có thể không body/không reason.
+- WAITLISTED đã tới `startAt` được coi là EXPIRED dù worker chưa cập nhật: hủy trả `409 INVALID_STATE_TRANSITION`, không phải lỗi deadline.
 
 ```json
 // 200
@@ -672,20 +674,23 @@ COMMIT;
 
 ### 6.3 Hủy + tự promote (R2, E5 tăng capacity)
 
+R2 preflight user active/vai trò từ DB **trước khi tra registration**: thiếu Student/Organizer trả `403 FORBIDDEN` không phụ thuộc ID tồn tại. Sau đó kiểm tra chủ sở hữu/phạm vi đơn vị active không khóa để loại request không có quyền trước khi chờ khóa event. Preflight không phải quyết định cuối: R2 đọc lại user active/vai trò và scope từ DB **sau khi lấy khóa event** (snapshot READ COMMITTED mới); không bảo đảm thu hồi quyền tuyến tính tới commit. Sau khóa và kiểm tra quyền, lấy một `decision_at = clock_timestamp()` mới, dùng cùng mốc đó cho deadline 24h, ngoại lệ, hiệu lực waitlist, điều kiện trước start và thời điểm hủy/promote. Không dùng `now()` đầu transaction để quyết định R2. Nếu đã tới start tại mốc quyết định thì không hủy/promote; quyết định hợp lệ trước start có thể commit sau start (không phải kiểm tra lại ở commit).
+
 ```sql
 BEGIN;
 SELECT start_at, capacity, registered_count FROM events WHERE id = :event_id FOR UPDATE;
 SELECT status AS old_status FROM registrations WHERE id = :reg_id FOR UPDATE;
+-- R2: kiểm tra quyền, lấy clock_timestamp() làm :decision_at, kiểm tra deadline/start/state.
 
 UPDATE registrations
-SET status = 'CANCELLED', cancelled_at = now(), cancelled_by = :actor,
+SET status = 'CANCELLED', cancelled_at = :decision_at, cancelled_by = :actor,
     cancelled_by_user = :actor_id, cancel_reason = :reason,
-    cancellation_exception_until = NULL, updated_at = now()
+    cancellation_exception_until = NULL, updated_at = :decision_at
 WHERE id = :reg_id AND status IN ('REGISTERED','WAITLISTED')
 RETURNING id;
 -- old_status = REGISTERED → registered_count - 1; WAITLISTED → waitlist_count - 1
 
--- Promote người đầu waitlist (chỉ khi now() < start_at và còn chỗ)
+-- Promote người đầu waitlist (R2: chỉ khi :decision_at < start_at và còn chỗ)
 WITH head AS (
   SELECT id FROM registrations
   WHERE event_id = :event_id AND status = 'WAITLISTED'
@@ -693,13 +698,15 @@ WITH head AS (
   LIMIT 1
 )
 UPDATE registrations r
-SET status = 'REGISTERED', promoted_at = now(), updated_at = now()
+SET status = 'REGISTERED', promoted_at = :decision_at, updated_at = :decision_at
 FROM head WHERE r.id = head.id
 RETURNING r.id, r.student_id;
 -- Có dòng → registered_count + 1, waitlist_count - 1,
 --           INSERT notification 'PROMOTED' (INSERT lỗi thì rollback; gửi email bất đồng bộ sau commit lỗi không rollback — Q14)
 COMMIT;
 ```
+
+Mọi writer đổi status registration (kể cả worker expire) phải khóa event trước; vì vậy R2 đọc lại status sau khóa để giảm đúng counter. Khi đã chọn waitlist head mà UPDATE promote không trả dòng, đó là lỗi nội bộ, rollback chứ không bỏ qua người đầu hàng. UPDATE counter promote và INSERT SELECT audit hủy hộ đều phải tác động đúng 1 dòng; lỗi hoặc số dòng khác 1 rollback toàn bộ hủy, promote, counter, notification và audit.
 
 Với E5 tăng `capacity` thêm k chỗ, lặp bước promote tối đa k lần trong cùng transaction. `chk_capacity` là chốt chặn cuối: dù code có bug, DB vẫn từ chối mọi trạng thái vượt chỗ.
 
@@ -709,7 +716,7 @@ Với E5 tăng `capacity` thêm k chỗ, lặp bước promote tối đa k lần
 
 - Trong transaction E5, khóa `events` (`FOR UPDATE`) trước, lấy mốc `start_at` cũ. Nếu sự kiện PUBLISHED, còn trước cửa sổ 60 phút, và đổi `start_at`, `end_at` hoặc `location` trong vòng 24h trước mốc bắt đầu cũ, cập nhật `cancellation_exception_until = :new_start_at` cho **các registration REGISTERED hiện hữu**. Chỉ cấp cho sinh viên đã đăng ký trước khi thay đổi, không cấp cho đăng ký đến sau; có thể ghi `exceptionGrantedCount` vào `activity_logs`. Ghi notification trong cùng transaction.
 - Nếu đổi giờ bắt đầu làm sự kiện còn hơn 24h nữa, ai cũng có quyền hủy theo deadline mới; cột ngoại lệ không làm thay đổi quyền bình thường. Nếu cập nhật nhiều lần, chỉ cập nhật người đang REGISTERED tại lần thay đổi đó, giữ ngoại lệ đã cấp trước (nếu còn hiệu lực) theo giờ bắt đầu mới.
-- R2 kiểm tra điều kiện hủy **bên trong transaction sau khi khóa event**: `status = REGISTERED AND (now() < start_at - interval '24 hours' OR (now() < start_at AND now() < cancellation_exception_until))`; WAITLISTED có thể rời hàng chờ trước `start_at` không cần ngoại lệ. Hủy xong `cancellation_exception_until` về NULL. Khi event bắt đầu, ngoại lệ tự hết hiệu lực theo điều kiện `now() < start_at`.
+- R2 kiểm tra điều kiện hủy **bên trong transaction sau khi khóa event**, dùng `decision_at` ở §6.3: `status = REGISTERED AND decision_at < start_at AND (decision_at < start_at - interval '24 hours' OR decision_at < cancellation_exception_until)`; WAITLISTED có thể rời hàng chờ trước `start_at` không cần ngoại lệ. Hủy xong `cancellation_exception_until` về NULL. Khi event bắt đầu, ngoại lệ tự hết hiệu lực theo điều kiện `decision_at < start_at`.
 - Đây là assumption do nhóm chốt, không phải quy tắc đã được client phê duyệt riêng.
 
 **SQL tham khảo cho E5** (chạy sau khi đã khóa `events`, xác minh Organizer, validation và trước khi ghi notification/commit):

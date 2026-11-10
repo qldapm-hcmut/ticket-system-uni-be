@@ -1,7 +1,9 @@
 package http
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -71,11 +73,23 @@ func (h *Handler) register(c echo.Context) error {
 }
 
 func (h *Handler) cancel(c echo.Context) error {
-	id, ok := student(c)
-	if !ok {
-		return mapErr(c, a.ErrForbidden)
+	// R2 has an optional JSON object; an absent body remains valid for self.
+	rawBody, err := io.ReadAll(http.MaxBytesReader(c.Response(), c.Request().Body, 16384))
+	if err != nil {
+		return mapErr(c, a.ErrValidation)
 	}
-	result, err := h.s.Cancel(c.Request().Context(), id, c.Param("id"))
+	var body map[string]json.RawMessage
+	if len(rawBody) != 0 && (json.Unmarshal(rawBody, &body) != nil || body == nil) {
+		return mapErr(c, a.ErrValidation)
+	}
+	reason := ""
+	if raw, exists := body["reason"]; exists {
+		if string(raw) == "null" || json.Unmarshal(raw, &reason) != nil {
+			return mapErr(c, a.ErrValidation)
+		}
+	}
+	id := c.Get("auth.profile").(auth.Profile).ID
+	result, err := h.s.Cancel(c.Request().Context(), id, c.Param("id"), reason)
 	if err != nil {
 		return mapErr(c, err)
 	}
@@ -83,7 +97,10 @@ func (h *Handler) cancel(c echo.Context) error {
 	if result.Promoted != nil {
 		promoted = result.Promoted.ID
 	}
-	return c.JSON(200, map[string]any{"data": dto(result.Registration), "meta": map[string]any{"promotedRegistrationId": promoted}})
+	data := dto(result.Registration)
+	data["cancelledAt"] = result.Registration.CancelledAt
+	data["cancelledBy"] = result.Registration.CancelledBy
+	return c.JSON(200, map[string]any{"data": data, "meta": map[string]any{"promotedRegistrationId": promoted}})
 }
 
 func (h *Handler) mine(c echo.Context) error {

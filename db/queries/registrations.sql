@@ -34,14 +34,26 @@ UPDATE events SET registered_count=registered_count+1, updated_at=now() WHERE id
 -- name: IncrementWaitlist :exec
 UPDATE events SET waitlist_count=waitlist_count+1, updated_at=now() WHERE id=$1;
 
+-- name: GetCancellationDecisionTime :one
+SELECT clock_timestamp()::timestamptz AS decision_at;
+
 -- name: CancelRegistration :one
-UPDATE registrations r SET status='CANCELLED',cancelled_at=now(),cancelled_by=$2,cancelled_by_user=$3,
- cancellation_exception_until=NULL,updated_at=now()
+UPDATE registrations r SET status='CANCELLED',cancelled_at=sqlc.arg(decision_at)::timestamptz,
+ cancelled_by=sqlc.arg(cancelled_by),cancelled_by_user=sqlc.arg(actor_id),
+ cancel_reason=sqlc.narg(reason),cancellation_exception_until=NULL,updated_at=sqlc.arg(decision_at)
 FROM events e
-WHERE r.id=$1 AND r.student_id=$3 AND e.id=r.event_id
- AND r.status IN ('REGISTERED','WAITLISTED') AND now()<e.start_at
- AND (r.status='WAITLISTED' OR now()<e.start_at-interval '24 hours' OR now()<r.cancellation_exception_until)
+WHERE r.id=sqlc.arg(id) AND e.id=r.event_id
+ AND r.status IN ('REGISTERED','WAITLISTED') AND sqlc.arg(decision_at)<e.start_at
+ AND ((sqlc.arg(cancelled_by)::cancel_actor='ORGANIZER' AND r.student_id<>sqlc.arg(actor_id))
+   OR (r.student_id=sqlc.arg(actor_id) AND
+     (r.status='WAITLISTED' OR sqlc.arg(decision_at)<e.start_at-interval '24 hours' OR sqlc.arg(decision_at)<r.cancellation_exception_until)))
 RETURNING r.*;
+
+-- name: AuditRegistrationCancellation :execrows
+INSERT INTO activity_logs(actor_id,event_id,entity_type,entity_id,action,metadata)
+SELECT r.cancelled_by_user,r.event_id,'REGISTRATION',r.id,'CANCEL_ON_BEHALF',
+ jsonb_build_object('reason',r.cancel_reason,'studentId',r.student_id)
+FROM registrations r WHERE r.id=$1;
 
 -- name: DecrementRegistrationCounter :exec
 UPDATE events SET registered_count=registered_count-CASE WHEN sqlc.arg(was_registered)::boolean THEN 1 ELSE 0 END,
@@ -52,9 +64,11 @@ UPDATE events SET registered_count=registered_count-CASE WHEN sqlc.arg(was_regis
 SELECT * FROM registrations WHERE event_id=$1 AND status='WAITLISTED' ORDER BY queue_seq LIMIT 1 FOR UPDATE;
 
 -- name: PromoteRegistration :one
-UPDATE registrations SET status='REGISTERED',promoted_at=now(),updated_at=now() WHERE id=$1 AND status='WAITLISTED' RETURNING *;
+UPDATE registrations r SET status='REGISTERED',promoted_at=sqlc.arg(decision_at)::timestamptz,updated_at=sqlc.arg(decision_at)
+FROM events e WHERE r.id=sqlc.arg(id) AND r.status='WAITLISTED' AND e.id=r.event_id
+ AND sqlc.arg(decision_at)<e.start_at RETURNING r.*;
 
--- name: IncrementPromotedCounters :exec
+-- name: IncrementPromotedCounters :execrows
 UPDATE events SET registered_count=registered_count+1,waitlist_count=waitlist_count-1,updated_at=now() WHERE id=$1 AND registered_count < capacity;
 
 -- name: ListMyRegistrations :many
