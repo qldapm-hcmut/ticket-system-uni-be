@@ -74,6 +74,18 @@ func (q *Queries) CreateDraftEvent(ctx context.Context, arg CreateDraftEventPara
 	return i, err
 }
 
+const deleteDraftEvent = `-- name: DeleteDraftEvent :execrows
+DELETE FROM events WHERE id=$1 AND status='DRAFT'
+`
+
+func (q *Queries) DeleteDraftEvent(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDraftEvent, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getEvent = `-- name: GetEvent :one
 SELECT id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at FROM events WHERE id=$1
 `

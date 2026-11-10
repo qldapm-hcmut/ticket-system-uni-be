@@ -19,6 +19,7 @@ type EventRepository interface {
 	Get(context.Context, string, bool) (domain.Event, error)
 	Create(context.Context, string, string, domain.Fields) (domain.Event, error)
 	Update(context.Context, domain.Event) (domain.Event, error)
+	DeleteDraft(context.Context, string) error
 	Cancel(context.Context, domain.Event, string, string) (domain.Event, int64, error)
 }
 type UnitOfWork interface {
