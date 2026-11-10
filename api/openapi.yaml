@@ -484,10 +484,17 @@ paths:
       tags: [Events]
       operationId: deleteDraftEvent
       summary: E6 — Xóa sự kiện, chỉ khi DRAFT
+      description: |
+        Chỉ Organizer thuộc đơn vị active được gán; không yêu cầu là người tạo.
+        Không có vai trò Organizer (kể cả Admin đơn thuần) → `403 FORBIDDEN`.
+        Organizer ngoài phạm vi, đơn vị inactive hoặc sự kiện không tồn tại → `404 NOT_FOUND`.
+        Khóa event, kiểm tra phạm vi/trạng thái và xóa trong cùng transaction.
+        Không phải DRAFT → `409 INVALID_STATE_TRANSITION`. Giữ nguyên FK NO ACTION, không cascade/xóa lịch sử.
       parameters:
         - $ref: '#/components/parameters/EventId'
       responses:
         '204': { description: Đã xóa }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }

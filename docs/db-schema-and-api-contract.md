@@ -80,7 +80,7 @@ Repository hiện không lưu file sơ đồ drawio; schema thực thi chuẩn n
 
 ### 2.2 Mapping ERD → schema
 
-Mỗi thực thể thành một bảng `snake_case` số nhiều với khóa `uuid`; quan hệ 1–N thành FK ở phía N, N–N thành bảng trung gian, 1–0..1 gộp thành cột nullable của bảng phía 1. Không xóa cứng dữ liệu nghiệp vụ (dùng `status`, `is_active`), nên mọi FK để mặc định `ON DELETE NO ACTION`.
+Mỗi thực thể thành một bảng `snake_case` số nhiều với khóa `uuid`; quan hệ 1–N thành FK ở phía N, N–N thành bảng trung gian, 1–0..1 gộp thành cột nullable của bảng phía 1. Không xóa cứng dữ liệu nghiệp vụ (dùng `status`, `is_active`), ngoại trừ xóa nháp DRAFT theo E6; mọi FK vẫn để mặc định `ON DELETE NO ACTION`.
 
 | Quan hệ trong ERD | Bản số | Hiện thực trong schema |
 | --- | --- | --- |
@@ -505,6 +505,8 @@ Validation: người gọi phải là ORGANIZER của `unitId`; `endAt > startAt
 { "data": { ...Event object, "version": 4 },
   "meta": { "significantChange": true, "notifiedCount": 127, "promotedCount": 0 } }
 ```
+
+**E6 `DELETE /events/{eventId}`** — chỉ Organizer của đơn vị active được gán, không yêu cầu là người tạo; Admin đơn thuần không có quyền xóa. Không có vai trò Organizer trả `403 FORBIDDEN`; Organizer ngoài phạm vi (kể cả đơn vị inactive) hoặc sự kiện không tồn tại trả `404 NOT_FOUND`. Khóa dòng event, kiểm tra phạm vi rồi trạng thái và xóa trong cùng transaction với các mutation khác. Chỉ DRAFT được xóa; mọi trạng thái khác trả `409 INVALID_STATE_TRANSITION`. Thành công trả `204` không body; ID sai định dạng trả `400 VALIDATION_ERROR`. Giữ nguyên FK `NO ACTION`, không cascade hoặc xóa/tách lịch sử audit, registration, notification để ép xóa nháp.
 
 **E7 `POST /events/{eventId}/cancel`** — `{ "reason": "Diễn giả bận đột xuất" }` (không được chỉ whitespace, tối đa 500 ký tự). Chỉ Organizer của đơn vị active được hủy; Admin không tự có quyền này. PUBLISHED → CANCELLED; mọi registration REGISTERED/WAITLISTED → `CANCELLED_BY_EVENT`, xóa ngoại lệ hủy, đếm về 0, notify `EVENT_CANCELLED`. Giữ lịch sử check-in; không promote khi hủy sự kiện. Khóa event trước registrations; event, registrations, notification và audit `CANCEL_EVENT` commit cùng transaction, lỗi bất kỳ rollback toàn bộ. `If-Match` tùy chọn; sai version trả `409 VERSION_CONFLICT`, không phải PUBLISHED trả `409 INVALID_STATE_TRANSITION`. Trả `meta.affectedCount` (số registration active bị hủy).
 

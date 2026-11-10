@@ -46,6 +46,7 @@ type Querier interface {
 	CreateDraftEvent(ctx context.Context, arg CreateDraftEventParams) (Event, error)
 	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	DecrementRegistrationCounter(ctx context.Context, arg DecrementRegistrationCounterParams) error
+	DeleteDraftEvent(ctx context.Context, id pgtype.UUID) (int64, error)
 	ExpireEventWaitlist(ctx context.Context, eventID pgtype.UUID) (int64, error)
 	FindWaitlistHead(ctx context.Context, eventID pgtype.UUID) (Registration, error)
 	GetActiveRegistration(ctx context.Context, arg GetActiveRegistrationParams) (Registration, error)
