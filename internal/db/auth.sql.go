@@ -104,13 +104,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 }
 
 const getUserRoles = `-- name: GetUserRoles :one
-SELECT u.student_code IS NOT NULL AS is_student, u.is_admin,
+SELECT (u.student_code IS NOT NULL)::boolean AS is_student, u.is_admin,
        EXISTS (SELECT 1 FROM unit_memberships m WHERE m.user_id = u.id) AS is_organizer
 FROM users u WHERE u.id = $1 AND u.is_active = true
 `
 
 type GetUserRolesRow struct {
-	IsStudent   interface{}
+	IsStudent   bool
 	IsAdmin     bool
 	IsOrganizer bool
 }

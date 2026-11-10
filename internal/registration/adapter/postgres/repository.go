@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -120,12 +121,49 @@ func (r *repo) Active(ctx context.Context, event, student string) (a.Registratio
 	x, err := r.q.GetActiveRegistration(ctx, db.GetActiveRegistrationParams{EventID: e, StudentID: s})
 	return mapReg(x.ID, x.EventID, x.StudentID, x.Status, x.QueueSeq, x.CheckinCode, x.CreatedAt, err)
 }
-func (r *repo) Cancel(ctx context.Context, id, student string) (a.CancellationResult, error) {
+
+// cancellationRoles must run before looking up the target and again after the
+// event lock: preflight prevents existence leaks and unauthorized lock waits;
+// only the fresh post-lock result is authoritative.
+func (r *repo) cancellationRoles(ctx context.Context, actor pgtype.UUID) (db.GetUserRolesRow, error) {
+	roles, err := r.q.GetUserRoles(ctx, actor)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !roles.IsStudent && !roles.IsOrganizer) {
+		return roles, a.ErrForbidden
+	}
+	return roles, err
+}
+
+func (r *repo) cancellationActor(ctx context.Context, original db.Registration, actor, unit pgtype.UUID, roles db.GetUserRolesRow) (db.CancelActor, error) {
+	if original.StudentID == actor {
+		// Ownership always wins over staff privileges, including Admin.
+		if !roles.IsStudent {
+			return "", a.ErrForbidden
+		}
+		return db.CancelActorSTUDENT, nil
+	}
+	if !roles.IsOrganizer {
+		return "", a.ErrNotFound
+	}
+	allowed, err := r.q.IsUnitOrganizer(ctx, db.IsUnitOrganizerParams{UserID: actor, UnitID: unit})
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", a.ErrNotFound
+	}
+	return db.CancelActorORGANIZER, nil
+}
+
+func (r *repo) Cancel(ctx context.Context, id, actor, reason string) (a.CancellationResult, error) {
 	i, err := uuid(id)
 	if err != nil {
 		return a.CancellationResult{}, err
 	}
-	s, err := uuid(student)
+	s, err := uuid(actor)
+	if err != nil {
+		return a.CancellationResult{}, err
+	}
+	roles, err := r.cancellationRoles(ctx, s)
 	if err != nil {
 		return a.CancellationResult{}, err
 	}
@@ -136,17 +174,52 @@ func (r *repo) Cancel(ctx context.Context, id, student string) (a.CancellationRe
 	if err != nil {
 		return a.CancellationResult{}, err
 	}
-	if original.StudentID != s {
-		return a.CancellationResult{}, a.ErrNotFound
+	// Non-locking owner/scope preflight. Do not queue unauthorized callers on
+	// the event row. Event/registration ownership is immutable in this API.
+	var unit pgtype.UUID
+	if original.StudentID != s && roles.IsOrganizer {
+		event, err := r.q.GetEvent(ctx, original.EventID)
+		if err != nil {
+			return a.CancellationResult{}, err
+		}
+		unit = event.UnitID
 	}
-	if _, err = r.q.GetEventForRegistration(ctx, original.EventID); err != nil {
+	by, err := r.cancellationActor(ctx, original, s, unit, roles)
+	if err != nil {
+		return a.CancellationResult{}, err
+	}
+	if by == db.CancelActorORGANIZER && reason == "" {
+		return a.CancellationResult{}, a.ErrValidation
+	}
+	event, err := r.q.GetEventForRegistration(ctx, original.EventID)
+	if err != nil {
+		return a.CancellationResult{}, err
+	}
+	roles, err = r.cancellationRoles(ctx, s)
+	if err != nil {
 		return a.CancellationResult{}, err
 	}
 	original, err = r.q.GetRegistration(ctx, i)
 	if err != nil {
 		return a.CancellationResult{}, err
 	}
-	x, err := r.q.CancelRegistration(ctx, db.CancelRegistrationParams{ID: i, CancelledBy: db.NullCancelActor{CancelActor: db.CancelActorSTUDENT, Valid: true}, CancelledByUser: s})
+	by, err = r.cancellationActor(ctx, original, s, event.UnitID, roles)
+	if err != nil {
+		return a.CancellationResult{}, err
+	}
+	// One fresh post-lock instant governs the entire cancellation and any
+	// promotion; transaction-start now() may predate a long lock wait.
+	decisionAt, err := r.q.GetCancellationDecisionTime(ctx)
+	if err != nil {
+		return a.CancellationResult{}, err
+	}
+	if original.Status == db.RegistrationStatusWAITLISTED && !decisionAt.Time.Before(event.StartAt.Time) {
+		return a.CancellationResult{}, a.ErrState // Effectively EXPIRED, even before the worker persists it.
+	}
+	x, err := r.q.CancelRegistration(ctx, db.CancelRegistrationParams{
+		ID: i, CancelledBy: db.NullCancelActor{CancelActor: by, Valid: true}, ActorID: s,
+		Reason: pgtype.Text{String: reason, Valid: reason != ""}, DecisionAt: decisionAt,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		if original.Status != db.RegistrationStatusREGISTERED && original.Status != db.RegistrationStatusWAITLISTED {
 			return a.CancellationResult{}, a.ErrState
@@ -163,15 +236,22 @@ func (r *repo) Cancel(ctx context.Context, id, student string) (a.CancellationRe
 	if err != nil {
 		return a.CancellationResult{}, err
 	}
+	if x.CancelledAt.Valid {
+		cancelled.CancelledAt = &x.CancelledAt.Time
+	}
+	if x.CancelledBy.Valid {
+		v := string(x.CancelledBy.CancelActor)
+		cancelled.CancelledBy = &v
+	}
 	if err = r.notify(ctx, cancelled, db.NotificationTypeREGCANCELLED); err != nil {
 		return a.CancellationResult{}, err
 	}
 	var promoted *a.Registration
 	if original.Status == db.RegistrationStatusREGISTERED {
 		if head, e := r.q.FindWaitlistHead(ctx, original.EventID); e == nil {
-			p, e := r.q.PromoteRegistration(ctx, head.ID)
+			p, e := r.q.PromoteRegistration(ctx, db.PromoteRegistrationParams{ID: head.ID, DecisionAt: decisionAt})
 			if e != nil {
-				return a.CancellationResult{}, e
+				return a.CancellationResult{}, fmt.Errorf("promote selected waitlist head %s for event %s: %w", head.ID.String(), original.EventID.String(), e)
 			}
 			v, e := mapReg(p.ID, p.EventID, p.StudentID, p.Status, p.QueueSeq, p.CheckinCode, p.CreatedAt, nil)
 			if e != nil {
@@ -181,11 +261,24 @@ func (r *repo) Cancel(ctx context.Context, id, student string) (a.CancellationRe
 				return a.CancellationResult{}, e
 			}
 			promoted = &v
-			if e = r.q.IncrementPromotedCounters(ctx, original.EventID); e != nil {
-				return a.CancellationResult{}, e
+			n, e := r.q.IncrementPromotedCounters(ctx, original.EventID)
+			if e != nil {
+				return a.CancellationResult{}, fmt.Errorf("increment promoted counters for event %s: %w", original.EventID.String(), e)
+			}
+			if n != 1 {
+				return a.CancellationResult{}, fmt.Errorf("increment promoted counters for event %s: expected 1 row, got %d", original.EventID.String(), n)
 			}
 		} else if !errors.Is(e, pgx.ErrNoRows) {
 			return a.CancellationResult{}, e
+		}
+	}
+	if by == db.CancelActorORGANIZER {
+		n, err := r.q.AuditRegistrationCancellation(ctx, i)
+		if err != nil {
+			return a.CancellationResult{}, fmt.Errorf("audit cancellation %s: %w", id, err)
+		}
+		if n != 1 {
+			return a.CancellationResult{}, fmt.Errorf("audit cancellation %s: expected 1 row, got %d", id, n)
 		}
 	}
 	return a.CancellationResult{Registration: cancelled, Promoted: promoted}, nil

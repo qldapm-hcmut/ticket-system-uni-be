@@ -11,24 +11,50 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const auditRegistrationCancellation = `-- name: AuditRegistrationCancellation :execrows
+INSERT INTO activity_logs(actor_id,event_id,entity_type,entity_id,action,metadata)
+SELECT r.cancelled_by_user,r.event_id,'REGISTRATION',r.id,'CANCEL_ON_BEHALF',
+ jsonb_build_object('reason',r.cancel_reason,'studentId',r.student_id)
+FROM registrations r WHERE r.id=$1
+`
+
+func (q *Queries) AuditRegistrationCancellation(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, auditRegistrationCancellation, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const cancelRegistration = `-- name: CancelRegistration :one
-UPDATE registrations r SET status='CANCELLED',cancelled_at=now(),cancelled_by=$2,cancelled_by_user=$3,
- cancellation_exception_until=NULL,updated_at=now()
+UPDATE registrations r SET status='CANCELLED',cancelled_at=$1::timestamptz,
+ cancelled_by=$2,cancelled_by_user=$3,
+ cancel_reason=$4,cancellation_exception_until=NULL,updated_at=$1
 FROM events e
-WHERE r.id=$1 AND r.student_id=$3 AND e.id=r.event_id
- AND r.status IN ('REGISTERED','WAITLISTED') AND now()<e.start_at
- AND (r.status='WAITLISTED' OR now()<e.start_at-interval '24 hours' OR now()<r.cancellation_exception_until)
+WHERE r.id=$5 AND e.id=r.event_id
+ AND r.status IN ('REGISTERED','WAITLISTED') AND $1<e.start_at
+ AND (($2::cancel_actor='ORGANIZER' AND r.student_id<>$3)
+   OR (r.student_id=$3 AND
+     (r.status='WAITLISTED' OR $1<e.start_at-interval '24 hours' OR $1<r.cancellation_exception_until)))
 RETURNING r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at
 `
 
 type CancelRegistrationParams struct {
-	ID              pgtype.UUID
-	CancelledBy     NullCancelActor
-	CancelledByUser pgtype.UUID
+	DecisionAt  pgtype.Timestamptz
+	CancelledBy NullCancelActor
+	ActorID     pgtype.UUID
+	Reason      pgtype.Text
+	ID          pgtype.UUID
 }
 
 func (q *Queries) CancelRegistration(ctx context.Context, arg CancelRegistrationParams) (Registration, error) {
-	row := q.db.QueryRow(ctx, cancelRegistration, arg.ID, arg.CancelledBy, arg.CancelledByUser)
+	row := q.db.QueryRow(ctx, cancelRegistration,
+		arg.DecisionAt,
+		arg.CancelledBy,
+		arg.ActorID,
+		arg.Reason,
+		arg.ID,
+	)
 	var i Registration
 	err := row.Scan(
 		&i.ID,
@@ -150,6 +176,17 @@ func (q *Queries) GetActiveRegistration(ctx context.Context, arg GetActiveRegist
 	return i, err
 }
 
+const getCancellationDecisionTime = `-- name: GetCancellationDecisionTime :one
+SELECT clock_timestamp()::timestamptz AS decision_at
+`
+
+func (q *Queries) GetCancellationDecisionTime(ctx context.Context) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getCancellationDecisionTime)
+	var decision_at pgtype.Timestamptz
+	err := row.Scan(&decision_at)
+	return decision_at, err
+}
+
 const getEventForRegistration = `-- name: GetEventForRegistration :one
 SELECT id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at FROM events WHERE id=$1 FOR UPDATE
 `
@@ -216,13 +253,16 @@ func (q *Queries) GetRegistration(ctx context.Context, id pgtype.UUID) (Registra
 	return i, err
 }
 
-const incrementPromotedCounters = `-- name: IncrementPromotedCounters :exec
+const incrementPromotedCounters = `-- name: IncrementPromotedCounters :execrows
 UPDATE events SET registered_count=registered_count+1,waitlist_count=waitlist_count-1,updated_at=now() WHERE id=$1 AND registered_count < capacity
 `
 
-func (q *Queries) IncrementPromotedCounters(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, incrementPromotedCounters, id)
-	return err
+func (q *Queries) IncrementPromotedCounters(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, incrementPromotedCounters, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const incrementRegistered = `-- name: IncrementRegistered :exec
@@ -310,11 +350,18 @@ func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistratio
 }
 
 const promoteRegistration = `-- name: PromoteRegistration :one
-UPDATE registrations SET status='REGISTERED',promoted_at=now(),updated_at=now() WHERE id=$1 AND status='WAITLISTED' RETURNING id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at
+UPDATE registrations r SET status='REGISTERED',promoted_at=$1::timestamptz,updated_at=$1
+FROM events e WHERE r.id=$2 AND r.status='WAITLISTED' AND e.id=r.event_id
+ AND $1<e.start_at RETURNING r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at
 `
 
-func (q *Queries) PromoteRegistration(ctx context.Context, id pgtype.UUID) (Registration, error) {
-	row := q.db.QueryRow(ctx, promoteRegistration, id)
+type PromoteRegistrationParams struct {
+	DecisionAt pgtype.Timestamptz
+	ID         pgtype.UUID
+}
+
+func (q *Queries) PromoteRegistration(ctx context.Context, arg PromoteRegistrationParams) (Registration, error) {
+	row := q.db.QueryRow(ctx, promoteRegistration, arg.DecisionAt, arg.ID)
 	var i Registration
 	err := row.Scan(
 		&i.ID,

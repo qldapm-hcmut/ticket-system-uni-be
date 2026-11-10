@@ -75,13 +75,16 @@ func TestRegistrationPersistence(t *testing.T) {
 	user := func() string {
 		t.Helper()
 		var id string
-		err := pool.QueryRow(ctx, `INSERT INTO users(email,full_name) VALUES (gen_random_uuid()::text || '@hcmut.edu.vn','Test') RETURNING id::text`).Scan(&id)
+		err := pool.QueryRow(ctx, `INSERT INTO users(email,full_name,student_code) VALUES (gen_random_uuid()::text || '@hcmut.edu.vn','Test',substr(gen_random_uuid()::text,1,10)) RETURNING id::text`).Scan(&id)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return id
 	}
 	owner := user()
+	if _, err := pool.Exec(ctx, `UPDATE users SET student_code=NULL WHERE id=$1`, owner); err != nil {
+		t.Fatal(err)
+	}
 	var unit string
 	if err := pool.QueryRow(ctx, `INSERT INTO units(code,name,type) VALUES ('TEST','Test','FACULTY') RETURNING id::text`).Scan(&unit); err != nil {
 		t.Fatal(err)
@@ -165,6 +168,9 @@ func TestRegistrationPersistence(t *testing.T) {
 		}
 		return out
 	}
+	t.Run("B3 cancellation on behalf", func(t *testing.T) {
+		testCancellationOnBehalf(t, pool, unit, owner, event, seed, counters, concurrent, checkQueue)
+	})
 	t.Run("QR issuance ownership and checkin", func(t *testing.T) {
 		codec, err := qrtoken.New(strings.Repeat("q", 32))
 		if err != nil {
@@ -438,7 +444,7 @@ func TestRegistrationPersistence(t *testing.T) {
 					t.Fatalf("partial changes persisted\nbefore=%s\nafter=%s", before, after)
 				}
 				counters(e, 1, 1)
-				if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID); !errors.Is(err, a.ErrCancelDeadline) {
+				if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, ""); !errors.Is(err, a.ErrCancelDeadline) {
 					t.Fatalf("exception leaked: %v", err)
 				}
 			})
@@ -697,10 +703,10 @@ func TestRegistrationPersistence(t *testing.T) {
 		if exception != nil {
 			t.Fatal("promoted user received exception")
 		}
-		if _, err := service.Cancel(ctx, regs[1].StudentID, regs[1].ID); !errors.Is(err, a.ErrCancelDeadline) {
+		if _, err := service.Cancel(ctx, regs[1].StudentID, regs[1].ID, ""); !errors.Is(err, a.ErrCancelDeadline) {
 			t.Fatalf("unexpected promoted cancellation: %v", err)
 		}
-		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID); err != nil {
+		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, ""); err != nil {
 			t.Fatal(err)
 		}
 		var logs int
@@ -754,7 +760,7 @@ func TestRegistrationPersistence(t *testing.T) {
 		if _, err := patch(e, 2, 1); !errors.Is(err, domain.ErrValidation) {
 			t.Fatalf("expected past-start validation: %v", err)
 		}
-		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID); !errors.Is(err, a.ErrCancelDeadline) {
+		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, ""); !errors.Is(err, a.ErrCancelDeadline) {
 			t.Fatalf("expected deadline: %v", err)
 		}
 		counters(e, 1, 1)
@@ -786,7 +792,7 @@ func TestRegistrationPersistence(t *testing.T) {
 		tasks := make([]func() error, 4)
 		for i := range tasks {
 			r := regs[i]
-			tasks[i] = func() error { _, err := service.Cancel(ctx, r.StudentID, r.ID); return err }
+			tasks[i] = func() error { _, err := service.Cancel(ctx, r.StudentID, r.ID, ""); return err }
 		}
 		for _, err := range concurrent(tasks...) {
 			if err != nil {
@@ -804,8 +810,8 @@ func TestRegistrationPersistence(t *testing.T) {
 			tasks := []func() error{
 				func() error { _, err := patch(e, 5, 1); return err },
 				func() error { _, err := service.Register(ctx, newStudent, e); return err },
-				func() error { _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID); return err },
-				func() error { _, err := service.Cancel(ctx, regs[1].StudentID, regs[1].ID); return err },
+				func() error { _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, ""); return err },
+				func() error { _, err := service.Cancel(ctx, regs[1].StudentID, regs[1].ID, ""); return err },
 			}
 			for _, err := range concurrent(tasks...) {
 				if err != nil {
@@ -827,7 +833,7 @@ func TestRegistrationPersistence(t *testing.T) {
 				t.Error(err)
 			}
 		}()
-		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID); err == nil {
+		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, ""); err == nil {
 			t.Fatal("expected promotion notification failure")
 		}
 		counters(e, 1, 2)
@@ -918,7 +924,7 @@ func TestRegistrationPersistence(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT id::text FROM registrations WHERE event_id=$1 AND student_id=$2`, e, students[0]).Scan(&regID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := service.Cancel(ctx, students[0], regID); err == nil {
+		if _, err := service.Cancel(ctx, students[0], regID, ""); err == nil {
 			t.Fatal("expected cancellation notification failure")
 		}
 		counters(e, 3, 1)
@@ -939,7 +945,7 @@ func TestRegistrationPersistence(t *testing.T) {
 		}
 		counters(e, 1, 2)
 		for i := 0; i < 2; i++ {
-			result, err := service.Cancel(ctx, students[i], regs[i].ID)
+			result, err := service.Cancel(ctx, students[i], regs[i].ID, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -959,7 +965,7 @@ func TestRegistrationPersistence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		result, err := service.Cancel(ctx, s2, r.ID)
+		result, err := service.Cancel(ctx, s2, r.ID, "")
 		if err != nil {
 			t.Fatal(err)
 		}

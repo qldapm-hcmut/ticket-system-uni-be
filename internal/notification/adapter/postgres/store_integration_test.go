@@ -90,6 +90,7 @@ func TestNotificationFlow(t *testing.T) {
 		return scalar(`INSERT INTO users(email,full_name) VALUES(gen_random_uuid()::text||'@hcmut.edu.vn','Test') RETURNING id::text`)
 	}
 	owner, student, other, empty := user(), user(), user(), user()
+	exec(`UPDATE users SET student_code=substr(gen_random_uuid()::text,1,10) WHERE id IN ($1,$2)`, student, other)
 	unit := scalar(`INSERT INTO units(code,name,type) VALUES('NOTIF','Notifications','FACULTY') RETURNING id::text`)
 	exec(`INSERT INTO unit_memberships(user_id,unit_id,member_role) VALUES($1,$2,'ORGANIZER')`, owner, unit)
 	event := scalar(`INSERT INTO events(unit_id,created_by,title,location,start_at,end_at,registration_opens_at,registration_closes_at,capacity,waitlist_limit,status) VALUES($1,$2,'Notification flow','Campus',now()+interval '3 days',now()+interval '4 days',now()-interval '1 day',now()+interval '2 days',1,10,'PUBLISHED') RETURNING id::text`, unit, owner)
@@ -166,7 +167,7 @@ func TestNotificationFlow(t *testing.T) {
 	if waiting.Status != "WAITLISTED" {
 		t.Fatal(waiting)
 	}
-	if _, err := regs.Cancel(ctx, other, first.ID); err != nil {
+	if _, err := regs.Cancel(ctx, other, first.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	out := list(student, "")

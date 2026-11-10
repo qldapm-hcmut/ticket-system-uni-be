@@ -27,6 +27,7 @@ type Querier interface {
 	AuditEventCancellation(ctx context.Context, arg AuditEventCancellationParams) error
 	AuditEventChange(ctx context.Context, arg AuditEventChangeParams) error
 	AuditManualCheckin(ctx context.Context, id pgtype.UUID) error
+	AuditRegistrationCancellation(ctx context.Context, id pgtype.UUID) (int64, error)
 	AuditReportExport(ctx context.Context, arg AuditReportExportParams) error
 	CancelEventRegistrations(ctx context.Context, arg CancelEventRegistrationsParams) (int64, error)
 	CancelPublishedEvent(ctx context.Context, arg CancelPublishedEventParams) (Event, error)
@@ -50,6 +51,7 @@ type Querier interface {
 	ExpireEventWaitlist(ctx context.Context, eventID pgtype.UUID) (int64, error)
 	FindWaitlistHead(ctx context.Context, eventID pgtype.UUID) (Registration, error)
 	GetActiveRegistration(ctx context.Context, arg GetActiveRegistrationParams) (Registration, error)
+	GetCancellationDecisionTime(ctx context.Context) (pgtype.Timestamptz, error)
 	GetEvent(ctx context.Context, id pgtype.UUID) (Event, error)
 	GetEventCreator(ctx context.Context, id pgtype.UUID) (GetEventCreatorRow, error)
 	GetEventForRegistration(ctx context.Context, id pgtype.UUID) (Event, error)
@@ -65,7 +67,7 @@ type Querier interface {
 	GetUserByGoogleSub(ctx context.Context, googleSub pgtype.Text) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	GetUserRoles(ctx context.Context, id pgtype.UUID) (GetUserRolesRow, error)
-	IncrementPromotedCounters(ctx context.Context, id pgtype.UUID) error
+	IncrementPromotedCounters(ctx context.Context, id pgtype.UUID) (int64, error)
 	IncrementRegistered(ctx context.Context, id pgtype.UUID) error
 	IncrementWaitlist(ctx context.Context, id pgtype.UUID) error
 	IsRegistrationWindowOpen(ctx context.Context, id pgtype.UUID) (pgtype.Bool, error)
@@ -87,7 +89,7 @@ type Querier interface {
 	MarkMyNotificationsRead(ctx context.Context, arg MarkMyNotificationsReadParams) (int64, error)
 	NotifyEventChanged(ctx context.Context, eventID pgtype.UUID) (int64, error)
 	NotifyRegistration(ctx context.Context, arg NotifyRegistrationParams) error
-	PromoteRegistration(ctx context.Context, id pgtype.UUID) (Registration, error)
+	PromoteRegistration(ctx context.Context, arg PromoteRegistrationParams) (Registration, error)
 	PromoteWaitlistForCapacity(ctx context.Context, arg PromoteWaitlistForCapacityParams) (int32, error)
 	RegisterStudent(ctx context.Context, arg RegisterStudentParams) (RegisterStudentRow, error)
 	RejectEvent(ctx context.Context, arg RejectEventParams) (Event, error)
