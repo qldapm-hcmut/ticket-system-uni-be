@@ -67,6 +67,7 @@ type Querier interface {
 	GetUserByGoogleSub(ctx context.Context, googleSub pgtype.Text) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	GetUserRoles(ctx context.Context, id pgtype.UUID) (GetUserRolesRow, error)
+	GetWaitlistPosition(ctx context.Context, registrationID pgtype.UUID) (int64, error)
 	IncrementPromotedCounters(ctx context.Context, id pgtype.UUID) (int64, error)
 	IncrementRegistered(ctx context.Context, id pgtype.UUID) error
 	IncrementWaitlist(ctx context.Context, id pgtype.UUID) error
@@ -79,7 +80,7 @@ type Querier interface {
 	ListEventRegistrationViews(ctx context.Context, arg ListEventRegistrationViewsParams) ([][]byte, error)
 	ListManagedEvents(ctx context.Context, arg ListManagedEventsParams) ([]Event, error)
 	ListMyNotifications(ctx context.Context, arg ListMyNotificationsParams) ([]ListMyNotificationsRow, error)
-	ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]Registration, error)
+	ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]ListMyRegistrationsRow, error)
 	ListPendingEvents(ctx context.Context, arg ListPendingEventsParams) ([]Event, error)
 	ListPublishedEvents(ctx context.Context, arg ListPublishedEventsParams) ([]Event, error)
 	ListReportRegistrations(ctx context.Context, arg ListReportRegistrationsParams) ([]ListReportRegistrationsRow, error)

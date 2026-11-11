@@ -72,10 +72,35 @@ FROM events e WHERE r.id=sqlc.arg(id) AND r.status='WAITLISTED' AND e.id=r.event
 UPDATE events SET registered_count=registered_count+1,waitlist_count=waitlist_count-1,updated_at=now() WHERE id=$1 AND registered_count < capacity;
 
 -- name: ListMyRegistrations :many
-SELECT * FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2) ORDER BY created_at DESC LIMIT $3 OFFSET $4;
+SELECT sqlc.embed(r),
+ CASE WHEN r.status='WAITLISTED' AND e.start_at<=sqlc.arg(decision_at)::timestamptz
+   THEN 'EXPIRED' ELSE r.status::text END::text AS effective_status,
+ e.title AS event_title, e.location AS event_location, e.start_at AS event_start_at,
+ e.end_at AS event_end_at, e.status AS event_status,
+ -- Rank the entire live event queue, not just this owner or result page.
+ COALESCE(CASE WHEN r.status='WAITLISTED' AND e.start_at>sqlc.arg(decision_at) THEN
+   (SELECT count(*) FROM registrations w WHERE w.event_id=r.event_id AND w.status='WAITLISTED'
+    AND (w.queue_seq,w.id)<=(r.queue_seq,r.id)) END,0)::bigint AS waitlist_position
+FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=sqlc.arg(student_id)
+ AND (NOT sqlc.arg(upcoming)::boolean OR e.end_at>sqlc.arg(decision_at))
+ AND (sqlc.arg(status_filter)::text='' OR
+  CASE WHEN r.status='WAITLISTED' AND e.start_at<=sqlc.arg(decision_at) THEN 'EXPIRED' ELSE r.status::text END=sqlc.arg(status_filter))
+ORDER BY r.created_at DESC,r.id DESC
+LIMIT sqlc.arg(page_size) OFFSET sqlc.arg(page_offset);
 
 -- name: CountMyRegistrations :one
-SELECT count(*) FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2);
+SELECT count(*) FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=sqlc.arg(student_id)
+ AND (NOT sqlc.arg(upcoming)::boolean OR e.end_at>sqlc.arg(decision_at)::timestamptz)
+ AND (sqlc.arg(status_filter)::text='' OR
+  CASE WHEN r.status='WAITLISTED' AND e.start_at<=sqlc.arg(decision_at) THEN 'EXPIRED' ELSE r.status::text END=sqlc.arg(status_filter));
+
+-- name: GetWaitlistPosition :one
+SELECT count(*)::bigint FROM registrations w JOIN registrations r ON r.id=sqlc.arg(registration_id)
+JOIN events e ON e.id=r.event_id
+WHERE w.event_id=r.event_id AND w.status='WAITLISTED' AND r.status='WAITLISTED'
+ AND now()<e.start_at AND (w.queue_seq,w.id)<=(r.queue_seq,r.id);
 
 -- name: IsRegistrationWindowOpen :one
 SELECT now() >= registration_opens_at AND now() < registration_closes_at AS is_open FROM events WHERE id=$1;

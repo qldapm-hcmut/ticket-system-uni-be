@@ -31,7 +31,7 @@ func (s *Store) OwnedRegistration(ctx context.Context, student, registration str
 		CheckinCode: row.CheckinCode, CreatedAt: row.CreatedAt.Time,
 		Event: a.EventSummary{ID: row.EventID.String(), Title: row.EventTitle, Location: row.EventLocation,
 			StartAt: row.EventStartAt.Time, EndAt: row.EventEndAt.Time, Status: string(row.EventStatus)}}
-	if row.Status == db.RegistrationStatusWAITLISTED {
+	if row.Status == "WAITLISTED" && row.WaitlistPosition >= 1 {
 		v.WaitlistPosition = &row.WaitlistPosition
 	}
 	if row.CheckedInAt.Valid {

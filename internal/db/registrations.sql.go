@@ -80,16 +80,27 @@ func (q *Queries) CancelRegistration(ctx context.Context, arg CancelRegistration
 }
 
 const countMyRegistrations = `-- name: CountMyRegistrations :one
-SELECT count(*) FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2)
+SELECT count(*) FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=$1
+ AND (NOT $2::boolean OR e.end_at>$3::timestamptz)
+ AND ($4::text='' OR
+  CASE WHEN r.status='WAITLISTED' AND e.start_at<=$3 THEN 'EXPIRED' ELSE r.status::text END=$4)
 `
 
 type CountMyRegistrationsParams struct {
-	StudentID pgtype.UUID
-	Column2   interface{}
+	StudentID    pgtype.UUID
+	Upcoming     bool
+	DecisionAt   pgtype.Timestamptz
+	StatusFilter string
 }
 
 func (q *Queries) CountMyRegistrations(ctx context.Context, arg CountMyRegistrationsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countMyRegistrations, arg.StudentID, arg.Column2)
+	row := q.db.QueryRow(ctx, countMyRegistrations,
+		arg.StudentID,
+		arg.Upcoming,
+		arg.DecisionAt,
+		arg.StatusFilter,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -253,6 +264,20 @@ func (q *Queries) GetRegistration(ctx context.Context, id pgtype.UUID) (Registra
 	return i, err
 }
 
+const getWaitlistPosition = `-- name: GetWaitlistPosition :one
+SELECT count(*)::bigint FROM registrations w JOIN registrations r ON r.id=$1
+JOIN events e ON e.id=r.event_id
+WHERE w.event_id=r.event_id AND w.status='WAITLISTED' AND r.status='WAITLISTED'
+ AND now()<e.start_at AND (w.queue_seq,w.id)<=(r.queue_seq,r.id)
+`
+
+func (q *Queries) GetWaitlistPosition(ctx context.Context, registrationID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getWaitlistPosition, registrationID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const incrementPromotedCounters = `-- name: IncrementPromotedCounters :execrows
 UPDATE events SET registered_count=registered_count+1,waitlist_count=waitlist_count-1,updated_at=now() WHERE id=$1 AND registered_count < capacity
 `
@@ -295,49 +320,86 @@ func (q *Queries) IsRegistrationWindowOpen(ctx context.Context, id pgtype.UUID) 
 }
 
 const listMyRegistrations = `-- name: ListMyRegistrations :many
-SELECT id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2) ORDER BY created_at DESC LIMIT $3 OFFSET $4
+SELECT r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at,
+ CASE WHEN r.status='WAITLISTED' AND e.start_at<=$1::timestamptz
+   THEN 'EXPIRED' ELSE r.status::text END::text AS effective_status,
+ e.title AS event_title, e.location AS event_location, e.start_at AS event_start_at,
+ e.end_at AS event_end_at, e.status AS event_status,
+ -- Rank the entire live event queue, not just this owner or result page.
+ COALESCE(CASE WHEN r.status='WAITLISTED' AND e.start_at>$1 THEN
+   (SELECT count(*) FROM registrations w WHERE w.event_id=r.event_id AND w.status='WAITLISTED'
+    AND (w.queue_seq,w.id)<=(r.queue_seq,r.id)) END,0)::bigint AS waitlist_position
+FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=$2
+ AND (NOT $3::boolean OR e.end_at>$1)
+ AND ($4::text='' OR
+  CASE WHEN r.status='WAITLISTED' AND e.start_at<=$1 THEN 'EXPIRED' ELSE r.status::text END=$4)
+ORDER BY r.created_at DESC,r.id DESC
+LIMIT $6 OFFSET $5
 `
 
 type ListMyRegistrationsParams struct {
-	StudentID pgtype.UUID
-	Column2   interface{}
-	Limit     int32
-	Offset    int32
+	DecisionAt   pgtype.Timestamptz
+	StudentID    pgtype.UUID
+	Upcoming     bool
+	StatusFilter string
+	PageOffset   int32
+	PageSize     int32
 }
 
-func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]Registration, error) {
+type ListMyRegistrationsRow struct {
+	Registration     Registration
+	EffectiveStatus  string
+	EventTitle       string
+	EventLocation    string
+	EventStartAt     pgtype.Timestamptz
+	EventEndAt       pgtype.Timestamptz
+	EventStatus      EventStatus
+	WaitlistPosition int64
+}
+
+func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]ListMyRegistrationsRow, error) {
 	rows, err := q.db.Query(ctx, listMyRegistrations,
+		arg.DecisionAt,
 		arg.StudentID,
-		arg.Column2,
-		arg.Limit,
-		arg.Offset,
+		arg.Upcoming,
+		arg.StatusFilter,
+		arg.PageOffset,
+		arg.PageSize,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Registration{}
+	items := []ListMyRegistrationsRow{}
 	for rows.Next() {
-		var i Registration
+		var i ListMyRegistrationsRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.EventID,
-			&i.StudentID,
-			&i.Status,
-			&i.QueueSeq,
-			&i.PromotedAt,
-			&i.CancelledAt,
-			&i.CancellationExceptionUntil,
-			&i.CancelledBy,
-			&i.CancelledByUser,
-			&i.CancelReason,
-			&i.CheckinCode,
-			&i.CheckedInAt,
-			&i.CheckinMethod,
-			&i.CheckedInBy,
-			&i.CheckinNote,
-			&i.CreatedAt,
-			&i.UpdatedAt,
+			&i.Registration.ID,
+			&i.Registration.EventID,
+			&i.Registration.StudentID,
+			&i.Registration.Status,
+			&i.Registration.QueueSeq,
+			&i.Registration.PromotedAt,
+			&i.Registration.CancelledAt,
+			&i.Registration.CancellationExceptionUntil,
+			&i.Registration.CancelledBy,
+			&i.Registration.CancelledByUser,
+			&i.Registration.CancelReason,
+			&i.Registration.CheckinCode,
+			&i.Registration.CheckedInAt,
+			&i.Registration.CheckinMethod,
+			&i.Registration.CheckedInBy,
+			&i.Registration.CheckinNote,
+			&i.Registration.CreatedAt,
+			&i.Registration.UpdatedAt,
+			&i.EffectiveStatus,
+			&i.EventTitle,
+			&i.EventLocation,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.EventStatus,
+			&i.WaitlistPosition,
 		); err != nil {
 			return nil, err
 		}

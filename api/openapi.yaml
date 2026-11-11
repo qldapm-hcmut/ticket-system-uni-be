@@ -733,7 +733,7 @@ paths:
       description: |
         Không có body; sinh viên lấy từ token. Người gọi phải có vai trò STUDENT (có MSSV), nếu không `403 FORBIDDEN`.
         Organizer kiêm sinh viên đăng ký được như sinh viên thường. Kết quả `status` là `REGISTERED` hoặc `WAITLISTED`.
-        Lỗi: `409 ALREADY_REGISTERED` (kèm `details.registrationId`), `409 EVENT_FULL`, `422 REGISTRATION_CLOSED`.
+        Lỗi: `409 ALREADY_REGISTERED` (kèm `details.registrationId`; race hiếm khi winner đã hủy trước lần đọc lại sau rollback thì vẫn 409 nhưng không có `details`), `409 EVENT_FULL`, `422 REGISTRATION_CLOSED`.
       parameters:
         - $ref: '#/components/parameters/EventId'
       responses:
@@ -891,13 +891,19 @@ paths:
       tags: [Registrations]
       operationId: listMyRegistrations
       summary: R3 — Đăng ký của tôi (sinh viên)
+      description: |
+        Chỉ trả đăng ký của sinh viên đang gọi, kèm EventBrief. Sắp createdAt DESC, id DESC.
+        WAITLISTED từ startAt được trả EXPIRED dù worker chưa cập nhật; status lọc theo trạng thái hiệu lực.
+        waitlistPosition là vị trí FIFO trong toàn bộ waitlist còn hiệu lực của sự kiện, trước lọc/phân trang,
+        null nếu không WAITLISTED. Count, dữ liệu sự kiện và các dòng đọc trong cùng snapshot.
+        Query có mặt phải có đúng một giá trị không rỗng; upcoming chỉ nhận true hoặc false.
       parameters:
         - name: status
           in: query
           schema: { $ref: '#/components/schemas/RegistrationStatus' }
         - name: upcoming
           in: query
-          description: Chỉ sự kiện chưa kết thúc
+          description: Chỉ sự kiện có endAt lớn hơn thời điểm đọc (bao gồm sự kiện đang diễn ra)
           schema: { type: boolean, default: false }
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
@@ -914,7 +920,9 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/MyRegistrationItem' }
                   meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   # ===================== CHECK-IN =====================
   /events/{eventId}/check-ins:

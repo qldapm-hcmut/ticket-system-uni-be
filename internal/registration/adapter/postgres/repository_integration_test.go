@@ -168,6 +168,9 @@ func TestRegistrationPersistence(t *testing.T) {
 		}
 		return out
 	}
+	t.Run("B4 owned registrations", func(t *testing.T) {
+		testOwnedRegistrations(t, pool, user, event, seed, counters)
+	})
 	t.Run("B3 cancellation on behalf", func(t *testing.T) {
 		testCancellationOnBehalf(t, pool, unit, owner, event, seed, counters, concurrent, checkQueue)
 	})
