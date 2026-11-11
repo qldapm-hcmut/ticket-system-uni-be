@@ -13,6 +13,7 @@ import (
 type Registration struct {
 	ID, EventID, StudentID, Status, CheckinCode string
 	QueueSeq                                    int64
+	WaitlistPosition                            *int64
 	CreatedAt                                   time.Time
 	CancelledAt                                 *time.Time
 	CancelledBy                                 *string
@@ -37,20 +38,30 @@ type RegistrationRepository interface {
 	Register(context.Context, string, string) (Registration, error)
 	Active(context.Context, string, string) (Registration, error)
 	Cancel(context.Context, string, string, string) (CancellationResult, error)
-	Mine(context.Context, string, string, int32, int32) ([]Registration, int64, error)
+	// Mine must be the first and only repository operation in a fresh unit of
+	// work: the adapter establishes a read-only snapshot and DB decision time.
+	Mine(context.Context, string, MineFilter) ([]MyRegistration, int64, error)
 }
 type UnitOfWork interface {
 	shared.UnitOfWork[RegistrationRepository]
 }
-type Service struct{ uow UnitOfWork }
+type Service struct {
+	uow UnitOfWork
+}
 
-func New(u UnitOfWork) *Service { return &Service{u} }
+func New(u UnitOfWork) *Service { return &Service{uow: u} }
+
+// AlreadyRegistered identifies the active registration, including insert races.
+type AlreadyRegistered struct{ RegistrationID string }
+
+func (e *AlreadyRegistered) Error() string { return ErrAlreadyActive.Error() }
+func (e *AlreadyRegistered) Unwrap() error { return ErrAlreadyActive }
 func (s *Service) Register(ctx context.Context, student, event string) (Registration, error) {
 	var out Registration
 	err := s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
 		a, e := r.Active(ctx, event, student)
 		if e == nil && a.ID != "" {
-			return ErrAlreadyActive
+			return &AlreadyRegistered{RegistrationID: a.ID}
 		}
 		if e != nil && !errors.Is(e, ErrNotFound) {
 			return e
@@ -58,6 +69,24 @@ func (s *Service) Register(ctx context.Context, student, event string) (Registra
 		out, e = r.Register(ctx, event, student)
 		return e
 	})
+	// An insert unique violation aborts the transaction. Do returns only after
+	// rollback; resolve the winner through a new transaction, never the failed one.
+	var duplicate *AlreadyRegistered
+	if errors.Is(err, ErrAlreadyActive) && !errors.As(err, &duplicate) {
+		readErr := s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
+			winner, e := r.Active(ctx, event, student)
+			if errors.Is(e, ErrNotFound) {
+				// The winner can be cancelled before this fresh read. The insert
+				// still conflicted; do not misreport a missing event or stale ID.
+				return ErrAlreadyActive
+			}
+			if e != nil {
+				return e
+			}
+			return &AlreadyRegistered{RegistrationID: winner.ID}
+		})
+		return Registration{}, readErr
+	}
 	return out, err
 }
 
@@ -76,12 +105,35 @@ func (s *Service) Cancel(ctx context.Context, actor, id, reason string) (Cancell
 	})
 	return out, err
 }
-func (s *Service) Mine(ctx context.Context, student, status string, page, size int32) ([]Registration, int64, error) {
-	var out []Registration
+
+type MineFilter struct {
+	Status         string
+	Upcoming       bool
+	Page, PageSize int32
+}
+
+type MyRegistration struct {
+	Registration
+	Event EventSummary
+}
+
+func (s *Service) Mine(ctx context.Context, student string, f MineFilter) ([]MyRegistration, int64, error) {
+	if f.Page < 1 || f.PageSize < 1 || f.PageSize > 100 || int64(f.Page-1)*int64(f.PageSize) > 2147483647 {
+		return nil, 0, ErrValidation
+	}
+	switch f.Status {
+	case "", "REGISTERED", "WAITLISTED", "CANCELLED", "CANCELLED_BY_EVENT", "EXPIRED":
+	default:
+		return nil, 0, ErrValidation
+	}
+	out := make([]MyRegistration, 0)
 	var count int64
 	err := s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
-		var e error
-		out, count, e = r.Mine(ctx, student, status, (page-1)*size, size)
+		rows, n, e := r.Mine(ctx, student, f)
+		if rows != nil {
+			out = rows
+		}
+		count = n
 		return e
 	})
 	return out, count, err

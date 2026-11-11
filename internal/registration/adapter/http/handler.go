@@ -48,16 +48,36 @@ func mapErr(c echo.Context, err error) error {
 	case errors.Is(err, a.ErrFull):
 		status, code = 409, "EVENT_FULL"
 	}
-	return c.JSON(status, map[string]any{"error": map[string]string{"code": code, "message": http.StatusText(status)}})
+	body := map[string]any{"code": code, "message": http.StatusText(status)}
+	var duplicate *a.AlreadyRegistered
+	if errors.As(err, &duplicate) {
+		body["details"] = map[string]string{"registrationId": duplicate.RegistrationID}
+	}
+	return c.JSON(status, map[string]any{"error": body})
 }
 
 func dto(r a.Registration) map[string]any {
-	return map[string]any{"id": r.ID, "eventId": r.EventID, "status": r.Status, "waitlistPosition": nil, "checkinCode": func() any {
+	var position *int64
+	if r.Status == "WAITLISTED" && r.WaitlistPosition != nil && *r.WaitlistPosition >= 1 {
+		position = r.WaitlistPosition
+	}
+	data := map[string]any{"id": r.ID, "eventId": r.EventID, "status": r.Status, "waitlistPosition": position, "checkinCode": func() any {
 		if r.Status == "REGISTERED" {
-			return r.CheckinCode
+			code := r.CheckinCode
+			if len(code) == 8 {
+				code = code[:4] + "-" + code[4:]
+			}
+			return code
 		}
 		return nil
 	}(), "createdAt": r.CreatedAt}
+	if r.CancelledAt != nil {
+		data["cancelledAt"] = r.CancelledAt
+	}
+	if r.CancelledBy != nil {
+		data["cancelledBy"] = r.CancelledBy
+	}
+	return data
 }
 
 func (h *Handler) register(c echo.Context) error {
@@ -108,6 +128,22 @@ func (h *Handler) mine(c echo.Context) error {
 	if !ok {
 		return mapErr(c, a.ErrForbidden)
 	}
+	query := c.QueryParams()
+	for _, key := range []string{"page", "pageSize", "status", "upcoming"} {
+		if values, exists := query[key]; exists && (len(values) != 1 || values[0] == "") {
+			return mapErr(c, a.ErrValidation)
+		}
+	}
+	upcoming := false
+	if raw := c.QueryParam("upcoming"); raw != "" {
+		switch raw {
+		case "true":
+			upcoming = true
+		case "false":
+		default:
+			return mapErr(c, a.ErrValidation)
+		}
+	}
 	page, size := int32(1), int32(20)
 	if raw := c.QueryParam("page"); raw != "" {
 		v, err := strconv.ParseInt(raw, 10, 32)
@@ -131,13 +167,15 @@ func (h *Handler) mine(c echo.Context) error {
 	default:
 		return mapErr(c, a.ErrValidation)
 	}
-	rows, total, err := h.s.Mine(c.Request().Context(), id, c.QueryParam("status"), page, size)
+	rows, total, err := h.s.Mine(c.Request().Context(), id, a.MineFilter{Status: c.QueryParam("status"), Upcoming: upcoming, Page: page, PageSize: size})
 	if err != nil {
 		return mapErr(c, err)
 	}
 	data := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		data = append(data, dto(r))
+		item := dto(r.Registration)
+		item["event"] = r.Event
+		data = append(data, item)
 	}
 	return c.JSON(200, map[string]any{"data": data, "meta": map[string]any{"page": page, "pageSize": size, "totalItems": total, "totalPages": (total + int64(size) - 1) / int64(size)}})
 }

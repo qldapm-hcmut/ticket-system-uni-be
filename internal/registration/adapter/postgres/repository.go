@@ -23,10 +23,15 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{runner: platform.NewTransactionRunner(pool), q: db.New(pool)}
 }
 func (s *Store) Do(ctx context.Context, fn func(context.Context, a.RegistrationRepository) error) error {
-	return s.runner.Do(ctx, func(ctx context.Context, tx pgx.Tx) error { return translate(fn(ctx, &repo{s.q.WithTx(tx)})) })
+	return s.runner.Do(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return translate(fn(ctx, &repo{q: s.q.WithTx(tx), tx: tx}))
+	})
 }
 
-type repo struct{ q *db.Queries }
+type repo struct {
+	q  *db.Queries
+	tx pgx.Tx
+}
 
 func translate(err error) error {
 	var p *pgconn.PgError
@@ -98,6 +103,15 @@ func (r *repo) Register(ctx context.Context, event, student string) (a.Registrat
 	}
 	if err = r.notify(ctx, reg, db.NotificationType(reg.Status)); err != nil {
 		return a.Registration{}, err
+	}
+	if reg.Status == "WAITLISTED" {
+		position, e := r.q.GetWaitlistPosition(ctx, x.ID)
+		if e != nil {
+			return a.Registration{}, e
+		}
+		if position >= 1 {
+			reg.WaitlistPosition = &position
+		}
 	}
 	return reg, nil
 }
@@ -283,20 +297,46 @@ func (r *repo) Cancel(ctx context.Context, id, actor, reason string) (a.Cancella
 	}
 	return a.CancellationResult{Registration: cancelled, Promoted: promoted}, nil
 }
-func (r *repo) Mine(ctx context.Context, student, status string, offset, size int32) ([]a.Registration, int64, error) {
+func (r *repo) Mine(ctx context.Context, student string, f a.MineFilter) ([]a.MyRegistration, int64, error) {
+	// Must be the first repository operation in a fresh Store.Do transaction:
+	// SET TRANSACTION cannot change isolation after any query. Service.Mine
+	// deliberately calls only this method. Count, status, brief and rank share
+	// the snapshot established by the following single DB clock read.
+	if _, err := r.tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"); err != nil {
+		return nil, 0, err
+	}
 	s, err := uuid(student)
 	if err != nil {
 		return nil, 0, err
 	}
-	rows, err := r.q.ListMyRegistrations(ctx, db.ListMyRegistrationsParams{StudentID: s, Column2: status, Limit: size, Offset: offset})
+	decision, err := r.q.GetCancellationDecisionTime(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	n, err := r.q.CountMyRegistrations(ctx, db.CountMyRegistrationsParams{StudentID: s, Column2: status})
-	out := make([]a.Registration, 0, len(rows))
-	for _, x := range rows {
-		v, _ := mapReg(x.ID, x.EventID, x.StudentID, x.Status, x.QueueSeq, x.CheckinCode, x.CreatedAt, nil)
-		out = append(out, v)
+	n, err := r.q.CountMyRegistrations(ctx, db.CountMyRegistrationsParams{StudentID: s, StatusFilter: f.Status, Upcoming: f.Upcoming, DecisionAt: decision})
+	if err != nil {
+		return nil, 0, err
 	}
-	return out, n, err
+	rows, err := r.q.ListMyRegistrations(ctx, db.ListMyRegistrationsParams{StudentID: s, StatusFilter: f.Status, Upcoming: f.Upcoming, DecisionAt: decision, PageSize: f.PageSize, PageOffset: (f.Page - 1) * f.PageSize})
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]a.MyRegistration, 0, len(rows))
+	for _, row := range rows {
+		x := row.Registration
+		v, _ := mapReg(x.ID, x.EventID, x.StudentID, db.RegistrationStatus(row.EffectiveStatus), x.QueueSeq, x.CheckinCode, x.CreatedAt, nil)
+		if v.Status == "WAITLISTED" && row.WaitlistPosition >= 1 {
+			position := row.WaitlistPosition
+			v.WaitlistPosition = &position
+		}
+		if x.CancelledAt.Valid {
+			v.CancelledAt = &x.CancelledAt.Time
+		}
+		if x.CancelledBy.Valid {
+			by := string(x.CancelledBy.CancelActor)
+			v.CancelledBy = &by
+		}
+		out = append(out, a.MyRegistration{Registration: v, Event: a.EventSummary{ID: x.EventID.String(), Title: row.EventTitle, Location: row.EventLocation, StartAt: row.EventStartAt.Time, EndAt: row.EventEndAt.Time, Status: string(row.EventStatus)}})
+	}
+	return out, n, nil
 }

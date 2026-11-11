@@ -532,7 +532,7 @@ Validation: người gọi phải là ORGANIZER của `unitId`; `endAt > startAt
             "waitlistPosition": 8, "checkinCode": null, "createdAt": "..." } }
 ```
 
-Lỗi: `409 ALREADY_REGISTERED` (kèm `details.registrationId`), `409 EVENT_FULL`, `422 REGISTRATION_CLOSED`. `checkinCode` chỉ hiện khi REGISTERED.
+Lỗi: `409 ALREADY_REGISTERED` (kèm `details.registrationId`; riêng race hiếm khi winner đã hủy trước lần đọc lại sau rollback thì vẫn 409 nhưng không có `details`), `409 EVENT_FULL`, `422 REGISTRATION_CLOSED`. `checkinCode` chỉ hiện khi REGISTERED.
 
 **R2 `POST /registrations/{registrationId}/cancel`** — `{ "reason": "..." }` (tùy chọn với sinh viên, bắt buộc khi Organizer hủy hộ).
 
@@ -547,9 +547,9 @@ Lỗi: `409 ALREADY_REGISTERED` (kèm `details.registrationId`), `409 EVENT_FULL
   "meta": { "promotedRegistrationId": "r40..." } }
 ```
 
-**R3 `GET /me/registrations`** — query `status`, `upcoming=true`. Mỗi phần tử gồm registration + event rút gọn (`id`, `title`, `startAt`, `location`, `status`).
+**R3 `GET /me/registrations`** — chỉ đăng ký của sinh viên đang gọi (không có MSSV trả `403 FORBIDDEN`); query `status`, `upcoming=true`, `page`, `pageSize`. Mỗi phần tử gồm registration + EventBrief (`id`, `title`, `startAt`, `endAt`, `location`, `status`). `upcoming=true` chỉ lấy `endAt > thời điểm đọc`, bao gồm sự kiện đang diễn ra. WAITLISTED từ `startAt` trả EXPIRED dù worker chưa cập nhật; `status` lọc trạng thái hiệu lực. `waitlistPosition` là thứ tự FIFO trong toàn bộ waitlist còn hiệu lực của sự kiện trước lọc/phân trang, null nếu không WAITLISTED. Sắp `createdAt DESC, id DESC`; count, event và rows dùng cùng snapshot và một mốc thời gian đọc từ DB ngay trong transaction. Các field tùy chọn `cancelledAt`, `cancelledBy` được trả khi có dữ liệu. Query có mặt phải có đúng một giá trị không rỗng; `upcoming` chỉ nhận `true`/`false`, input sai trả `400 VALIDATION_ERROR`.
 
-**R4 `GET /registrations/{registrationId}`** — trả thêm `qrToken` khi REGISTERED:
+**R4 `GET /registrations/{registrationId}`** — chỉ đọc đăng ký của chính sinh viên; trả thêm `qrToken` khi REGISTERED. WAITLISTED từ `startAt` trả EXPIRED và `waitlistPosition: null` theo thời gian DB dù worker chưa cập nhật; trước đó rank FIFO `(queueSeq, id)` trên toàn bộ waitlist như R3:
 
 ```json
 { "data": { "id": "r55...", "status": "REGISTERED", "checkinCode": "K7Q2-M9XD",

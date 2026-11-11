@@ -12,10 +12,16 @@ import (
 )
 
 const auditRegistrationCancellation = `-- name: AuditRegistrationCancellation :execrows
-INSERT INTO activity_logs(actor_id,event_id,entity_type,entity_id,action,metadata)
-SELECT r.cancelled_by_user,r.event_id,'REGISTRATION',r.id,'CANCEL_ON_BEHALF',
- jsonb_build_object('reason',r.cancel_reason,'studentId',r.student_id)
-FROM registrations r WHERE r.id=$1
+INSERT INTO activity_logs (actor_id, event_id, entity_type, entity_id, action, metadata)
+SELECT
+    r.cancelled_by_user,
+    r.event_id,
+    'REGISTRATION',
+    r.id,
+    'CANCEL_ON_BEHALF',
+    jsonb_build_object('reason', r.cancel_reason, 'studentId', r.student_id)
+FROM registrations r
+WHERE r.id = $1
 `
 
 func (q *Queries) AuditRegistrationCancellation(ctx context.Context, id pgtype.UUID) (int64, error) {
@@ -27,15 +33,35 @@ func (q *Queries) AuditRegistrationCancellation(ctx context.Context, id pgtype.U
 }
 
 const cancelRegistration = `-- name: CancelRegistration :one
-UPDATE registrations r SET status='CANCELLED',cancelled_at=$1::timestamptz,
- cancelled_by=$2,cancelled_by_user=$3,
- cancel_reason=$4,cancellation_exception_until=NULL,updated_at=$1
+UPDATE registrations r
+SET
+    status = 'CANCELLED',
+    cancelled_at = $1::timestamptz,
+    cancelled_by = $2,
+    cancelled_by_user = $3,
+    cancel_reason = $4,
+    cancellation_exception_until = NULL,
+    updated_at = $1
 FROM events e
-WHERE r.id=$5 AND e.id=r.event_id
- AND r.status IN ('REGISTERED','WAITLISTED') AND $1<e.start_at
- AND (($2::cancel_actor='ORGANIZER' AND r.student_id<>$3)
-   OR (r.student_id=$3 AND
-     (r.status='WAITLISTED' OR $1<e.start_at-interval '24 hours' OR $1<r.cancellation_exception_until)))
+WHERE r.id = $5
+    AND e.id = r.event_id
+    -- Neither actor path may cancel an inactive registration or a started event.
+    AND r.status IN ('REGISTERED', 'WAITLISTED')
+    AND $1 < e.start_at
+    AND (
+        -- On-behalf cancellation must target another student's registration.
+        ($2::cancel_actor = 'ORGANIZER'
+            AND r.student_id <> $3)
+        OR (
+            -- Self-cancellation needs a waitlist entry, an open cutoff, or an exception.
+            r.student_id = $3
+            AND (
+                r.status = 'WAITLISTED'
+                OR $1 < e.start_at - interval '24 hours'
+                OR $1 < r.cancellation_exception_until
+            )
+        )
+    )
 RETURNING r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at
 `
 
@@ -80,25 +106,58 @@ func (q *Queries) CancelRegistration(ctx context.Context, arg CancelRegistration
 }
 
 const countMyRegistrations = `-- name: CountMyRegistrations :one
-SELECT count(*) FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2)
+SELECT
+    count(*)
+FROM registrations r
+JOIN events e ON e.id = r.event_id
+WHERE r.student_id = $1
+    AND (
+        NOT $2::boolean
+        OR e.end_at > $3::timestamptz
+    )
+    AND (
+        $4::text = ''
+        OR CASE
+            WHEN r.status = 'WAITLISTED'
+                AND e.start_at <= $3
+                THEN 'EXPIRED'
+            ELSE r.status::text
+        END = $4
+    )
 `
 
 type CountMyRegistrationsParams struct {
-	StudentID pgtype.UUID
-	Column2   interface{}
+	StudentID    pgtype.UUID
+	Upcoming     bool
+	DecisionAt   pgtype.Timestamptz
+	StatusFilter string
 }
 
 func (q *Queries) CountMyRegistrations(ctx context.Context, arg CountMyRegistrationsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countMyRegistrations, arg.StudentID, arg.Column2)
+	row := q.db.QueryRow(ctx, countMyRegistrations,
+		arg.StudentID,
+		arg.Upcoming,
+		arg.DecisionAt,
+		arg.StatusFilter,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const decrementRegistrationCounter = `-- name: DecrementRegistrationCounter :exec
-UPDATE events SET registered_count=registered_count-CASE WHEN $1::boolean THEN 1 ELSE 0 END,
- waitlist_count=waitlist_count-CASE WHEN $1::boolean THEN 0 ELSE 1 END,
- updated_at=now() WHERE id=$2
+UPDATE events
+SET
+    registered_count = registered_count - CASE
+        WHEN $1::boolean THEN 1
+        ELSE 0
+    END,
+    waitlist_count = waitlist_count - CASE
+        WHEN $1::boolean THEN 0
+        ELSE 1
+    END,
+    updated_at = now()
+WHERE id = $2
 `
 
 type DecrementRegistrationCounterParams struct {
@@ -112,7 +171,14 @@ func (q *Queries) DecrementRegistrationCounter(ctx context.Context, arg Decremen
 }
 
 const findWaitlistHead = `-- name: FindWaitlistHead :one
-SELECT id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at FROM registrations WHERE event_id=$1 AND status='WAITLISTED' ORDER BY queue_seq LIMIT 1 FOR UPDATE
+SELECT
+    id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at
+FROM registrations
+WHERE event_id = $1
+    AND status = 'WAITLISTED'
+ORDER BY queue_seq
+LIMIT 1
+FOR UPDATE
 `
 
 func (q *Queries) FindWaitlistHead(ctx context.Context, eventID pgtype.UUID) (Registration, error) {
@@ -142,7 +208,12 @@ func (q *Queries) FindWaitlistHead(ctx context.Context, eventID pgtype.UUID) (Re
 }
 
 const getActiveRegistration = `-- name: GetActiveRegistration :one
-SELECT id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at FROM registrations WHERE event_id=$1 AND student_id=$2 AND status IN ('REGISTERED','WAITLISTED')
+SELECT
+    id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at
+FROM registrations
+WHERE event_id = $1
+    AND student_id = $2
+    AND status IN ('REGISTERED', 'WAITLISTED')
 `
 
 type GetActiveRegistrationParams struct {
@@ -177,7 +248,8 @@ func (q *Queries) GetActiveRegistration(ctx context.Context, arg GetActiveRegist
 }
 
 const getCancellationDecisionTime = `-- name: GetCancellationDecisionTime :one
-SELECT clock_timestamp()::timestamptz AS decision_at
+SELECT
+    clock_timestamp()::timestamptz AS decision_at
 `
 
 func (q *Queries) GetCancellationDecisionTime(ctx context.Context) (pgtype.Timestamptz, error) {
@@ -188,7 +260,11 @@ func (q *Queries) GetCancellationDecisionTime(ctx context.Context) (pgtype.Times
 }
 
 const getEventForRegistration = `-- name: GetEventForRegistration :one
-SELECT id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at FROM events WHERE id=$1 FOR UPDATE
+SELECT
+    id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
+FROM events
+WHERE id = $1
+FOR UPDATE
 `
 
 func (q *Queries) GetEventForRegistration(ctx context.Context, id pgtype.UUID) (Event, error) {
@@ -224,7 +300,10 @@ func (q *Queries) GetEventForRegistration(ctx context.Context, id pgtype.UUID) (
 }
 
 const getRegistration = `-- name: GetRegistration :one
-SELECT id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at FROM registrations WHERE id=$1
+SELECT
+    id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at
+FROM registrations
+WHERE id = $1
 `
 
 func (q *Queries) GetRegistration(ctx context.Context, id pgtype.UUID) (Registration, error) {
@@ -253,8 +332,34 @@ func (q *Queries) GetRegistration(ctx context.Context, id pgtype.UUID) (Registra
 	return i, err
 }
 
+const getWaitlistPosition = `-- name: GetWaitlistPosition :one
+SELECT
+    count(*)::bigint
+FROM registrations w
+JOIN registrations r ON r.id = $1
+JOIN events e ON e.id = r.event_id
+WHERE w.event_id = r.event_id
+    AND w.status = 'WAITLISTED'
+    AND r.status = 'WAITLISTED'
+    AND now() < e.start_at
+    AND (w.queue_seq, w.id) <= (r.queue_seq, r.id)
+`
+
+func (q *Queries) GetWaitlistPosition(ctx context.Context, registrationID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getWaitlistPosition, registrationID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const incrementPromotedCounters = `-- name: IncrementPromotedCounters :execrows
-UPDATE events SET registered_count=registered_count+1,waitlist_count=waitlist_count-1,updated_at=now() WHERE id=$1 AND registered_count < capacity
+UPDATE events
+SET
+    registered_count = registered_count + 1,
+    waitlist_count = waitlist_count - 1,
+    updated_at = now()
+WHERE id = $1
+    AND registered_count < capacity
 `
 
 func (q *Queries) IncrementPromotedCounters(ctx context.Context, id pgtype.UUID) (int64, error) {
@@ -266,7 +371,11 @@ func (q *Queries) IncrementPromotedCounters(ctx context.Context, id pgtype.UUID)
 }
 
 const incrementRegistered = `-- name: IncrementRegistered :exec
-UPDATE events SET registered_count=registered_count+1, updated_at=now() WHERE id=$1
+UPDATE events
+SET
+    registered_count = registered_count + 1,
+    updated_at = now()
+WHERE id = $1
 `
 
 func (q *Queries) IncrementRegistered(ctx context.Context, id pgtype.UUID) error {
@@ -275,7 +384,11 @@ func (q *Queries) IncrementRegistered(ctx context.Context, id pgtype.UUID) error
 }
 
 const incrementWaitlist = `-- name: IncrementWaitlist :exec
-UPDATE events SET waitlist_count=waitlist_count+1, updated_at=now() WHERE id=$1
+UPDATE events
+SET
+    waitlist_count = waitlist_count + 1,
+    updated_at = now()
+WHERE id = $1
 `
 
 func (q *Queries) IncrementWaitlist(ctx context.Context, id pgtype.UUID) error {
@@ -284,7 +397,11 @@ func (q *Queries) IncrementWaitlist(ctx context.Context, id pgtype.UUID) error {
 }
 
 const isRegistrationWindowOpen = `-- name: IsRegistrationWindowOpen :one
-SELECT now() >= registration_opens_at AND now() < registration_closes_at AS is_open FROM events WHERE id=$1
+SELECT
+    now() >= registration_opens_at
+        AND now() < registration_closes_at AS is_open
+FROM events
+WHERE id = $1
 `
 
 func (q *Queries) IsRegistrationWindowOpen(ctx context.Context, id pgtype.UUID) (pgtype.Bool, error) {
@@ -295,49 +412,118 @@ func (q *Queries) IsRegistrationWindowOpen(ctx context.Context, id pgtype.UUID) 
 }
 
 const listMyRegistrations = `-- name: ListMyRegistrations :many
-SELECT id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2) ORDER BY created_at DESC LIMIT $3 OFFSET $4
+SELECT
+    r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at,
+    CASE
+        WHEN r.status = 'WAITLISTED'
+            AND e.start_at <= $1::timestamptz
+            THEN 'EXPIRED'
+        ELSE r.status::text
+    END::text AS effective_status,
+    e.title AS event_title,
+    e.location AS event_location,
+    e.start_at AS event_start_at,
+    e.end_at AS event_end_at,
+    e.status AS event_status,
+    -- Rank the entire live event queue, not just this owner or result page.
+    COALESCE(
+        CASE
+            WHEN r.status = 'WAITLISTED'
+                AND e.start_at > $1
+                THEN (
+                    SELECT
+                        count(*)
+                    FROM registrations w
+                    WHERE w.event_id = r.event_id
+                        AND w.status = 'WAITLISTED'
+                        AND (w.queue_seq, w.id) <= (r.queue_seq, r.id)
+                )
+        END,
+        0
+    )::bigint AS waitlist_position
+FROM registrations r
+JOIN events e ON e.id = r.event_id
+WHERE r.student_id = $2
+    AND (
+        NOT $3::boolean
+        OR e.end_at > $1
+    )
+    AND (
+        $4::text = ''
+        OR CASE
+            WHEN r.status = 'WAITLISTED'
+                AND e.start_at <= $1
+                THEN 'EXPIRED'
+            ELSE r.status::text
+        END = $4
+    )
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $6
+OFFSET $5
 `
 
 type ListMyRegistrationsParams struct {
-	StudentID pgtype.UUID
-	Column2   interface{}
-	Limit     int32
-	Offset    int32
+	DecisionAt   pgtype.Timestamptz
+	StudentID    pgtype.UUID
+	Upcoming     bool
+	StatusFilter string
+	PageOffset   int32
+	PageSize     int32
 }
 
-func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]Registration, error) {
+type ListMyRegistrationsRow struct {
+	Registration     Registration
+	EffectiveStatus  string
+	EventTitle       string
+	EventLocation    string
+	EventStartAt     pgtype.Timestamptz
+	EventEndAt       pgtype.Timestamptz
+	EventStatus      EventStatus
+	WaitlistPosition int64
+}
+
+func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]ListMyRegistrationsRow, error) {
 	rows, err := q.db.Query(ctx, listMyRegistrations,
+		arg.DecisionAt,
 		arg.StudentID,
-		arg.Column2,
-		arg.Limit,
-		arg.Offset,
+		arg.Upcoming,
+		arg.StatusFilter,
+		arg.PageOffset,
+		arg.PageSize,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Registration{}
+	items := []ListMyRegistrationsRow{}
 	for rows.Next() {
-		var i Registration
+		var i ListMyRegistrationsRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.EventID,
-			&i.StudentID,
-			&i.Status,
-			&i.QueueSeq,
-			&i.PromotedAt,
-			&i.CancelledAt,
-			&i.CancellationExceptionUntil,
-			&i.CancelledBy,
-			&i.CancelledByUser,
-			&i.CancelReason,
-			&i.CheckinCode,
-			&i.CheckedInAt,
-			&i.CheckinMethod,
-			&i.CheckedInBy,
-			&i.CheckinNote,
-			&i.CreatedAt,
-			&i.UpdatedAt,
+			&i.Registration.ID,
+			&i.Registration.EventID,
+			&i.Registration.StudentID,
+			&i.Registration.Status,
+			&i.Registration.QueueSeq,
+			&i.Registration.PromotedAt,
+			&i.Registration.CancelledAt,
+			&i.Registration.CancellationExceptionUntil,
+			&i.Registration.CancelledBy,
+			&i.Registration.CancelledByUser,
+			&i.Registration.CancelReason,
+			&i.Registration.CheckinCode,
+			&i.Registration.CheckedInAt,
+			&i.Registration.CheckinMethod,
+			&i.Registration.CheckedInBy,
+			&i.Registration.CheckinNote,
+			&i.Registration.CreatedAt,
+			&i.Registration.UpdatedAt,
+			&i.EffectiveStatus,
+			&i.EventTitle,
+			&i.EventLocation,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.EventStatus,
+			&i.WaitlistPosition,
 		); err != nil {
 			return nil, err
 		}
@@ -350,9 +536,17 @@ func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistratio
 }
 
 const promoteRegistration = `-- name: PromoteRegistration :one
-UPDATE registrations r SET status='REGISTERED',promoted_at=$1::timestamptz,updated_at=$1
-FROM events e WHERE r.id=$2 AND r.status='WAITLISTED' AND e.id=r.event_id
- AND $1<e.start_at RETURNING r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at
+UPDATE registrations r
+SET
+    status = 'REGISTERED',
+    promoted_at = $1::timestamptz,
+    updated_at = $1
+FROM events e
+WHERE r.id = $2
+    AND r.status = 'WAITLISTED'
+    AND e.id = r.event_id
+    AND $1 < e.start_at
+RETURNING r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at
 `
 
 type PromoteRegistrationParams struct {
@@ -388,24 +582,50 @@ func (q *Queries) PromoteRegistration(ctx context.Context, arg PromoteRegistrati
 
 const registerStudent = `-- name: RegisterStudent :one
 WITH locked AS (
-  SELECT e.id, e.unit_id, e.created_by, e.title, e.description, e.location, e.start_at, e.end_at, e.registration_opens_at, e.registration_closes_at, e.capacity, e.waitlist_limit, e.registered_count, e.waitlist_count, e.status, e.approved_by, e.approved_at, e.reject_reason, e.published_at, e.cancelled_at, e.cancel_reason, e.version, e.created_at, e.updated_at FROM events e WHERE e.id=$1 FOR UPDATE
+    SELECT
+        e.id, e.unit_id, e.created_by, e.title, e.description, e.location, e.start_at, e.end_at, e.registration_opens_at, e.registration_closes_at, e.capacity, e.waitlist_limit, e.registered_count, e.waitlist_count, e.status, e.approved_by, e.approved_at, e.reject_reason, e.published_at, e.cancelled_at, e.cancel_reason, e.version, e.created_at, e.updated_at
+    FROM events e
+    WHERE e.id = $1
+    FOR UPDATE
 ), inserted AS (
-  INSERT INTO registrations (event_id, student_id, status, checkin_code)
-  SELECT $1, $2,
-    CASE WHEN e.registered_count < e.capacity THEN 'REGISTERED'::registration_status ELSE 'WAITLISTED'::registration_status END,
-    upper(substr(encode(gen_random_bytes(4),'hex'),1,8))
-  FROM locked e
-  WHERE e.status='PUBLISHED' AND now() >= e.registration_opens_at AND now() < e.registration_closes_at
-    AND (e.registered_count < e.capacity OR e.waitlist_limit IS NULL OR e.waitlist_count < e.waitlist_limit)
-  RETURNING id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at
+    INSERT INTO registrations (event_id, student_id, status, checkin_code)
+    SELECT
+        $1,
+        $2,
+        CASE
+            WHEN e.registered_count < e.capacity
+                THEN 'REGISTERED'::registration_status
+            ELSE 'WAITLISTED'::registration_status
+        END,
+        upper(substr(encode(gen_random_bytes(4), 'hex'), 1, 8))
+    FROM locked e
+    WHERE e.status = 'PUBLISHED'
+        AND now() >= e.registration_opens_at
+        AND now() < e.registration_closes_at
+        AND (
+            e.registered_count < e.capacity
+            OR e.waitlist_limit IS NULL
+            OR e.waitlist_count < e.waitlist_limit
+        )
+    RETURNING id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at
 ), counted AS (
-  UPDATE events e SET
-    registered_count = e.registered_count + CASE WHEN i.status='REGISTERED' THEN 1 ELSE 0 END,
-    waitlist_count = e.waitlist_count + CASE WHEN i.status='WAITLISTED' THEN 1 ELSE 0 END,
-    updated_at=now()
-  FROM inserted i WHERE e.id=i.event_id
+    UPDATE events e
+    SET
+        registered_count = e.registered_count + CASE
+            WHEN i.status = 'REGISTERED' THEN 1
+            ELSE 0
+        END,
+        waitlist_count = e.waitlist_count + CASE
+            WHEN i.status = 'WAITLISTED' THEN 1
+            ELSE 0
+        END,
+        updated_at = now()
+    FROM inserted i
+    WHERE e.id = i.event_id
 )
-SELECT inserted.id, inserted.event_id, inserted.student_id, inserted.status, inserted.queue_seq, inserted.promoted_at, inserted.cancelled_at, inserted.cancellation_exception_until, inserted.cancelled_by, inserted.cancelled_by_user, inserted.cancel_reason, inserted.checkin_code, inserted.checked_in_at, inserted.checkin_method, inserted.checked_in_by, inserted.checkin_note, inserted.created_at, inserted.updated_at FROM inserted
+SELECT
+    inserted.id, inserted.event_id, inserted.student_id, inserted.status, inserted.queue_seq, inserted.promoted_at, inserted.cancelled_at, inserted.cancellation_exception_until, inserted.cancelled_by, inserted.cancelled_by_user, inserted.cancel_reason, inserted.checkin_code, inserted.checked_in_at, inserted.checkin_method, inserted.checked_in_by, inserted.checkin_note, inserted.created_at, inserted.updated_at
+FROM inserted
 `
 
 type RegisterStudentParams struct {
