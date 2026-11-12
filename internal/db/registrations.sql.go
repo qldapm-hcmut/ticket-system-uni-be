@@ -597,7 +597,7 @@ WITH locked AS (
                 THEN 'REGISTERED'::registration_status
             ELSE 'WAITLISTED'::registration_status
         END,
-        upper(substr(encode(gen_random_bytes(4), 'hex'), 1, 8))
+        $3::text
     FROM locked e
     WHERE e.status = 'PUBLISHED'
         AND now() >= e.registration_opens_at
@@ -629,8 +629,9 @@ FROM inserted
 `
 
 type RegisterStudentParams struct {
-	ID        pgtype.UUID
-	StudentID pgtype.UUID
+	ID          pgtype.UUID
+	StudentID   pgtype.UUID
+	CheckinCode string
 }
 
 type RegisterStudentRow struct {
@@ -655,7 +656,7 @@ type RegisterStudentRow struct {
 }
 
 func (q *Queries) RegisterStudent(ctx context.Context, arg RegisterStudentParams) (RegisterStudentRow, error) {
-	row := q.db.QueryRow(ctx, registerStudent, arg.ID, arg.StudentID)
+	row := q.db.QueryRow(ctx, registerStudent, arg.ID, arg.StudentID, arg.CheckinCode)
 	var i RegisterStudentRow
 	err := row.Scan(
 		&i.ID,

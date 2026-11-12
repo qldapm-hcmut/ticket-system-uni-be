@@ -168,6 +168,9 @@ func TestRegistrationPersistence(t *testing.T) {
 		}
 		return out
 	}
+	t.Run("C1 checkin code collisions", func(t *testing.T) {
+		testCheckinCodeCollisions(t, pool, owner, user, event, counters, checkQueue)
+	})
 	t.Run("B4 owned registrations", func(t *testing.T) {
 		testOwnedRegistrations(t, pool, user, event, seed, counters)
 	})
