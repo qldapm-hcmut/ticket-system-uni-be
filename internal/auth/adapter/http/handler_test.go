@@ -3,7 +3,9 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,11 +15,11 @@ import (
 
 type fakeService struct{ logoutID string }
 
-func (*fakeService) Login(context.Context, string) (application.LoginResult, error) {
-	return application.LoginResult{User: application.User{ID: "user"}, Tokens: application.Tokens{AccessToken: "access", RefreshToken: "refresh", ExpiresIn: 900}}, nil
+func (*fakeService) Login(context.Context, string) (application.AuthResult, error) {
+	return application.AuthResult{User: application.User{ID: "user"}, Tokens: application.Tokens{AccessToken: "access", RefreshToken: "refresh", ExpiresIn: 900}}, nil
 }
-func (*fakeService) Refresh(context.Context, string) (application.Tokens, error) {
-	return application.Tokens{AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresIn: 900}, nil
+func (*fakeService) Refresh(context.Context, string) (application.AuthResult, error) {
+	return application.AuthResult{User: application.User{ID: "user"}, Tokens: application.Tokens{AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresIn: 900}}, nil
 }
 func (s *fakeService) Logout(_ context.Context, id, _ string) error { s.logoutID = id; return nil }
 
@@ -30,13 +32,21 @@ func (fakeAccess) VerifyAccessToken(raw string) (string, error) {
 	return "user", nil
 }
 
-type fakeProfiles struct{ disabled bool }
+type fakeProfiles struct {
+	disabled bool
+	err      error
+	readID   string
+}
 
-func (p *fakeProfiles) ReadProfile(context.Context, string) (application.Profile, error) {
+func (p *fakeProfiles) ReadProfile(_ context.Context, id string) (application.Profile, error) {
+	p.readID = id
+	if p.err != nil {
+		return application.Profile{}, p.err
+	}
 	if p.disabled {
 		return application.Profile{}, application.ErrUnauthenticated
 	}
-	return application.Profile{User: application.User{ID: "user", Email: "test@hcmut.edu.vn", IsActive: true, StudentCode: "2210001"}, Memberships: []application.Membership{{UnitID: "unit", MemberRole: "ORGANIZER"}}}, nil
+	return application.Profile{User: application.User{ID: "user", Email: "test@hcmut.edu.vn", FullName: "Test User", IsActive: true, StudentCode: "2210001", IsAdmin: true}, Memberships: []application.Membership{{UnitID: "unit", Code: "CSE", Name: "Computer Science", MemberRole: "ORGANIZER"}}}, nil
 }
 
 func TestHTTPRoutes(t *testing.T) {
@@ -85,5 +95,63 @@ func TestHTTPRoutes(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	if rec.Code != 401 {
 		t.Fatal("disabled user accepted")
+	}
+}
+
+// Omitting the profile read, using client identity, or decoding our new access
+// token (the fake verifier rejects it) must break this response contract.
+func TestRefreshResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		profiles fakeProfiles
+		status   int
+		code     string
+	}{
+		{name: "current profile", status: 200},
+		{name: "disabled after rotation", profiles: fakeProfiles{disabled: true}, status: 401, code: "UNAUTHENTICATED"},
+		{name: "deleted after rotation", profiles: fakeProfiles{err: application.ErrNotFound}, status: 401, code: "UNAUTHENTICATED"},
+		{name: "profile unavailable", profiles: fakeProfiles{err: errors.New("database unavailable")}, status: 500, code: "INTERNAL_ERROR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			New(&fakeService{}, fakeAccess{}, &tc.profiles).Register(e)
+			req := httptest.NewRequest("POST", "/api/v1/auth/refresh", strings.NewReader(`{"refreshToken":"old","userId":"attacker","isAdmin":false}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if tc.profiles.readID != "user" {
+				t.Fatalf("profile identity=%q, want trusted session user", tc.profiles.readID)
+			}
+			var payload struct {
+				Data  map[string]any        `json:"data"`
+				Error struct{ Code string } `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if tc.status != 200 {
+				if payload.Data != nil || payload.Error.Code != tc.code || strings.Contains(rec.Body.String(), "new-refresh") || strings.Contains(rec.Body.String(), "new-access") {
+					t.Fatalf("unexpected error response: %s", rec.Body.String())
+				}
+				return
+			}
+			if rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("refresh must not be cached")
+			}
+			want := map[string]any{
+				"accessToken": "new-access", "refreshToken": "new-refresh", "expiresIn": float64(900),
+				"user": map[string]any{
+					"id": "user", "email": "test@hcmut.edu.vn", "fullName": "Test User", "studentCode": "2210001",
+					"isAdmin": true, "isActive": true, "roles": []any{"STUDENT", "ORGANIZER", "ADMIN"},
+					"units": []any{map[string]any{"unit": map[string]any{"id": "unit", "code": "CSE", "name": "Computer Science"}, "memberRole": "ORGANIZER"}},
+				},
+			}
+			if !reflect.DeepEqual(payload.Data, want) {
+				t.Fatalf("data=%#v, want %#v", payload.Data, want)
+			}
+		})
 	}
 }

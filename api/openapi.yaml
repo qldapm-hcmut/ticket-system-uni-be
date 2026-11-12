@@ -124,6 +124,12 @@ paths:
       tags: [Auth]
       operationId: refreshToken
       summary: A2 — Đổi refresh token lấy access token mới
+      description: |
+        Xoay vòng refresh token và trả AuthTokens kèm hồ sơ user hiện tại (roles/units đọc từ DB),
+        định danh bằng session nội bộ, không nhận identity/quyền từ client.
+        Rotation commit trước khi đọc hồ sơ. Nếu đọc hồ sơ lỗi (500), hoặc user bị khóa/xóa
+        trước lần đọc này (401), không trả token; rotation không rollback, token cũ đã bị
+        tiêu thụ và client phải đăng nhập lại. Không retry bằng refresh token cũ.
       security: []
       requestBody:
         required: true
@@ -136,7 +142,10 @@ paths:
                 refreshToken: { type: string }
       responses:
         '200':
-          description: Token mới (refresh token được xoay vòng)
+          description: Token mới (refresh token được xoay vòng) và hồ sơ user hiện tại
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
           content:
             application/json:
               schema:
@@ -144,7 +153,13 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/AuthTokens' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '500':
+          description: INTERNAL_ERROR — lỗi hạ tầng; nếu rotation đã commit thì client phải đăng nhập lại
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /auth/logout:
     post:
