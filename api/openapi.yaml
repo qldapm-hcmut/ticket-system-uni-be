@@ -573,6 +573,7 @@ paths:
       tags: [Approval]
       operationId: submitEvent
       summary: P1 — Gửi duyệt (DRAFT/REJECTED → PENDING_APPROVAL)
+      description: Kiểm tra lại lịch; startAt và registrationClosesAt phải ở tương lai. Lỗi trả 422 VALIDATION_ERROR kèm details.fields.
       parameters:
         - $ref: '#/components/parameters/EventId'
       responses:
@@ -589,6 +590,8 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
 
   /approvals/pending:
     get:
@@ -619,7 +622,10 @@ paths:
     post:
       tags: [Approval]
       operationId: approveEvent
-      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+      description: >-
+        Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+        Kiểm tra lại lịch; startAt và registrationClosesAt phải ở tương lai.
+        Lỗi trả 422 VALIDATION_ERROR kèm details.fields.
       summary: P3 — Duyệt và công bố (Admin, không phải người tạo)
       parameters:
         - $ref: '#/components/parameters/EventId'
@@ -1385,7 +1391,9 @@ components:
       type: object
       required: [unitId, title, location, startAt, endAt, registrationOpensAt, registrationClosesAt, capacity]
       description: |
-        Ràng buộc: endAt > startAt; registrationOpensAt < registrationClosesAt <= startAt; startAt ở tương lai.
+        Ràng buộc: endAt > startAt; registrationOpensAt < registrationClosesAt <= startAt;
+        startAt và registrationClosesAt phải sau thời điểm hiện tại. registrationOpensAt có thể ở quá khứ.
+        Lỗi ngày trả VALIDATION_ERROR kèm details.fields.
       properties:
         unitId: { type: string, format: uuid }
         title: { type: string, minLength: 1, maxLength: 200 }
@@ -1403,7 +1411,10 @@ components:
     EventUpdate:
       type: object
       minProperties: 1
-      description: Tập con các field của EventCreate (không đổi được unitId)
+      description: >-
+        Tập con các field của EventCreate (không đổi được unitId).
+        DRAFT/REJECTED yêu cầu registrationClosesAt ở tương lai.
+        PUBLISHED được giữ nguyên hạn đã qua khi sửa field khác; nếu đổi hạn thì hạn mới phải ở tương lai.
       properties:
         title: { type: string, minLength: 1, maxLength: 200 }
         description: { type: [string, 'null'] }

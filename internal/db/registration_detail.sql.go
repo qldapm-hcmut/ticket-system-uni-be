@@ -11,6 +11,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getMyActiveRegistrationRef = `-- name: GetMyActiveRegistrationRef :one
+SELECT r.id, r.status,
+       CASE WHEN r.status='WAITLISTED' THEN
+         (SELECT count(*) FROM registrations w
+          WHERE w.event_id=r.event_id AND w.status='WAITLISTED' AND w.queue_seq<=r.queue_seq)
+       ELSE 0 END::bigint AS waitlist_position
+FROM registrations r
+WHERE r.event_id=$1 AND r.student_id=$2
+  AND r.status IN ('REGISTERED','WAITLISTED')
+`
+
+type GetMyActiveRegistrationRefParams struct {
+	EventID   pgtype.UUID
+	StudentID pgtype.UUID
+}
+
+type GetMyActiveRegistrationRefRow struct {
+	ID               pgtype.UUID
+	Status           RegistrationStatus
+	WaitlistPosition int64
+}
+
+func (q *Queries) GetMyActiveRegistrationRef(ctx context.Context, arg GetMyActiveRegistrationRefParams) (GetMyActiveRegistrationRefRow, error) {
+	row := q.db.QueryRow(ctx, getMyActiveRegistrationRef, arg.EventID, arg.StudentID)
+	var i GetMyActiveRegistrationRefRow
+	err := row.Scan(&i.ID, &i.Status, &i.WaitlistPosition)
+	return i, err
+}
+
 const getOwnedRegistrationView = `-- name: GetOwnedRegistrationView :one
 SELECT r.id, r.event_id, r.status, r.checkin_code, r.checked_in_at, r.checkin_method, r.created_at,
        e.title AS event_title, e.location AS event_location, e.start_at AS event_start_at,

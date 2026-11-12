@@ -40,7 +40,7 @@ func failure(c echo.Context, err error) error {
 	status, code := 500, "INTERNAL_ERROR"
 	switch {
 	case errors.Is(err, domain.ErrValidation):
-		status, code = 400, "VALIDATION_ERROR"
+		return validationFailure(c, http.StatusBadRequest, err)
 	case errors.Is(err, domain.ErrNotFound):
 		status, code = 404, "NOT_FOUND"
 	case errors.Is(err, domain.ErrForbidden):
@@ -53,6 +53,15 @@ func failure(c echo.Context, err error) error {
 		status, code = 409, "INVALID_STATE_TRANSITION"
 	}
 	return c.JSON(status, map[string]any{"error": map[string]string{"code": code, "message": http.StatusText(status)}})
+}
+
+func validationFailure(c echo.Context, status int, err error) error {
+	body := map[string]any{"code": "VALIDATION_ERROR", "message": "Dữ liệu không hợp lệ."}
+	var field *domain.FieldError
+	if errors.As(err, &field) {
+		body["details"] = map[string]any{"fields": []map[string]string{{"field": field.Field, "message": field.Message}}}
+	}
+	return c.JSON(status, map[string]any{"error": body})
 }
 func decode(c echo.Context, dst any) error {
 	kind, _, err := mime.ParseMediaType(c.Request().Header.Get("Content-Type"))
@@ -104,6 +113,15 @@ func (h *Handler) detail(c echo.Context) error {
 		return failure(c, err)
 	}
 	if fmt.Sprint(result["status"]) == "PUBLISHED" {
+		profile := c.Get("auth.profile").(auth.Profile)
+		if profile.StudentCode != "" {
+			ref, err := h.reader.MyActiveRegistration(c.Request().Context(), c.Param("id"), profile.ID)
+			if err != nil {
+				return failure(c, err)
+			}
+			result["myRegistration"] = ref
+			c.Response().Header().Set("Cache-Control", "no-store")
+		}
 		return c.JSON(200, map[string]any{"data": result})
 	}
 	if !a.IsAdmin && !a.IsOrganizer {

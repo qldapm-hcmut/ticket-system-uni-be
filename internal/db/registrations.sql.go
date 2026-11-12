@@ -54,16 +54,20 @@ func (q *Queries) CancelRegistration(ctx context.Context, arg CancelRegistration
 }
 
 const countMyRegistrations = `-- name: CountMyRegistrations :one
-SELECT count(*) FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2)
+SELECT count(*) FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=$1
+  AND ($2::text='' OR r.status::text=$2)
+  AND (NOT $3::boolean OR e.end_at>now())
 `
 
 type CountMyRegistrationsParams struct {
-	StudentID pgtype.UUID
-	Column2   interface{}
+	StudentID    pgtype.UUID
+	StatusFilter string
+	Upcoming     bool
 }
 
 func (q *Queries) CountMyRegistrations(ctx context.Context, arg CountMyRegistrationsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countMyRegistrations, arg.StudentID, arg.Column2)
+	row := q.db.QueryRow(ctx, countMyRegistrations, arg.StudentID, arg.StatusFilter, arg.Upcoming)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -255,49 +259,77 @@ func (q *Queries) IsRegistrationWindowOpen(ctx context.Context, id pgtype.UUID) 
 }
 
 const listMyRegistrations = `-- name: ListMyRegistrations :many
-SELECT id, event_id, student_id, status, queue_seq, promoted_at, cancelled_at, cancellation_exception_until, cancelled_by, cancelled_by_user, cancel_reason, checkin_code, checked_in_at, checkin_method, checked_in_by, checkin_note, created_at, updated_at FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2) ORDER BY created_at DESC LIMIT $3 OFFSET $4
+SELECT r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at, e.title, e.location, e.start_at, e.end_at, e.status AS event_status,
+       CASE WHEN r.status='WAITLISTED' THEN
+         (SELECT count(*) FROM registrations w
+          WHERE w.event_id=r.event_id AND w.status='WAITLISTED' AND w.queue_seq<=r.queue_seq)
+       ELSE 0 END::bigint AS waitlist_position
+FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=$1
+  AND ($2::text='' OR r.status::text=$2)
+  AND (NOT $3::boolean OR e.end_at>now())
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $5 OFFSET $4
 `
 
 type ListMyRegistrationsParams struct {
-	StudentID pgtype.UUID
-	Column2   interface{}
-	Limit     int32
-	Offset    int32
+	StudentID    pgtype.UUID
+	StatusFilter string
+	Upcoming     bool
+	PageOffset   int32
+	PageSize     int32
 }
 
-func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]Registration, error) {
+type ListMyRegistrationsRow struct {
+	Registration     Registration
+	Title            string
+	Location         string
+	StartAt          pgtype.Timestamptz
+	EndAt            pgtype.Timestamptz
+	EventStatus      EventStatus
+	WaitlistPosition int64
+}
+
+func (q *Queries) ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]ListMyRegistrationsRow, error) {
 	rows, err := q.db.Query(ctx, listMyRegistrations,
 		arg.StudentID,
-		arg.Column2,
-		arg.Limit,
-		arg.Offset,
+		arg.StatusFilter,
+		arg.Upcoming,
+		arg.PageOffset,
+		arg.PageSize,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Registration{}
+	items := []ListMyRegistrationsRow{}
 	for rows.Next() {
-		var i Registration
+		var i ListMyRegistrationsRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.EventID,
-			&i.StudentID,
-			&i.Status,
-			&i.QueueSeq,
-			&i.PromotedAt,
-			&i.CancelledAt,
-			&i.CancellationExceptionUntil,
-			&i.CancelledBy,
-			&i.CancelledByUser,
-			&i.CancelReason,
-			&i.CheckinCode,
-			&i.CheckedInAt,
-			&i.CheckinMethod,
-			&i.CheckedInBy,
-			&i.CheckinNote,
-			&i.CreatedAt,
-			&i.UpdatedAt,
+			&i.Registration.ID,
+			&i.Registration.EventID,
+			&i.Registration.StudentID,
+			&i.Registration.Status,
+			&i.Registration.QueueSeq,
+			&i.Registration.PromotedAt,
+			&i.Registration.CancelledAt,
+			&i.Registration.CancellationExceptionUntil,
+			&i.Registration.CancelledBy,
+			&i.Registration.CancelledByUser,
+			&i.Registration.CancelReason,
+			&i.Registration.CheckinCode,
+			&i.Registration.CheckedInAt,
+			&i.Registration.CheckinMethod,
+			&i.Registration.CheckedInBy,
+			&i.Registration.CheckinNote,
+			&i.Registration.CreatedAt,
+			&i.Registration.UpdatedAt,
+			&i.Title,
+			&i.Location,
+			&i.StartAt,
+			&i.EndAt,
+			&i.EventStatus,
+			&i.WaitlistPosition,
 		); err != nil {
 			return nil, err
 		}

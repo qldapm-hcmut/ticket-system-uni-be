@@ -5,7 +5,8 @@ COMPOSE ?= podman compose
 -include .env
 export
 
-.PHONY: run worker build test test-int lint fmt db-up db-down migrate-up migrate-down sqlc seed
+.PHONY: run worker build test test-int lint fmt db-up db-down migrate-up migrate-down sqlc seed dev-token
+ROLE ?= student
 run:
 	go run ./cmd/api
 worker:
@@ -36,3 +37,5 @@ seed:
 	@test -n "$(DATABASE_URL)" || (echo 'DATABASE_URL is required'; exit 1)
 	@test -n "$(ADMIN_EMAIL)" || (echo 'ADMIN_EMAIL is required (bootstrap school email)'; exit 1)
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -v admin_email="$(ADMIN_EMAIL)" -f db/seed/seed.sql
+dev-token:
+	@go run ./cmd/dev-token -role $(ROLE)

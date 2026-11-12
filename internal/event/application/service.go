@@ -34,7 +34,11 @@ func (s *Service) Create(ctx context.Context, actor Actor, unit string, f domain
 	if !actor.IsOrganizer {
 		return domain.Event{}, domain.ErrForbidden
 	}
-	if err := f.Validate(s.clock.Now()); err != nil {
+	now := s.clock.Now()
+	if err := f.Validate(now); err != nil {
+		return domain.Event{}, err
+	}
+	if err := f.ValidateRegistrationDeadline(now); err != nil {
 		return domain.Event{}, err
 	}
 	var result domain.Event
@@ -119,6 +123,11 @@ func (s *Service) Patch(ctx context.Context, actor Actor, id string, version int
 		}
 		if err = e.Fields.Validate(s.clock.Now()); err != nil {
 			return err
+		}
+		if e.Status != "PUBLISHED" || !old.RegistrationClosesAt.Equal(e.RegistrationClosesAt) {
+			if err = e.Fields.ValidateRegistrationDeadline(s.clock.Now()); err != nil {
+				return err
+			}
 		}
 		result, err = r.Update(ctx, e)
 		return err

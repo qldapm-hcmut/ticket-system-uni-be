@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/shared/kernel"
 )
 
 type ApprovalRepository interface {
@@ -17,9 +18,14 @@ type ApprovalRepository interface {
 type ApprovalUnitOfWork interface {
 	DoApproval(context.Context, func(ApprovalRepository) error) error
 }
-type ApprovalService struct{ uow ApprovalUnitOfWork }
+type ApprovalService struct {
+	uow   ApprovalUnitOfWork
+	clock kernel.Clock
+}
 
-func NewApprovalService(u ApprovalUnitOfWork) *ApprovalService { return &ApprovalService{u} }
+func NewApprovalService(u ApprovalUnitOfWork, clock kernel.Clock) *ApprovalService {
+	return &ApprovalService{u, clock}
+}
 func (s *ApprovalService) Submit(ctx context.Context, a Actor, id string, version int32) (domain.Event, error) {
 	var out domain.Event
 	err := s.uow.DoApproval(ctx, func(r ApprovalRepository) error {
@@ -39,6 +45,9 @@ func (s *ApprovalService) Submit(ctx context.Context, a Actor, id string, versio
 		}
 		if e.Status != "DRAFT" && e.Status != "REJECTED" {
 			return domain.ErrState
+		}
+		if err := s.validateSchedule(e.Fields); err != nil {
+			return err
 		}
 		out, err = r.Submit(ctx, id, e.Version)
 		if err != nil {
@@ -67,6 +76,9 @@ func (s *ApprovalService) Approve(ctx context.Context, a Actor, id string, versi
 		if e.Status != "PENDING_APPROVAL" {
 			return domain.ErrState
 		}
+		if err := s.validateSchedule(e.Fields); err != nil {
+			return err
+		}
 		out, err = r.Approve(ctx, id, e.Version, a.ID)
 		if err != nil {
 			return err
@@ -74,6 +86,14 @@ func (s *ApprovalService) Approve(ctx context.Context, a Actor, id string, versi
 		return r.Audit(ctx, a.ID, id, "APPROVE", "")
 	})
 	return out, err
+}
+
+func (s *ApprovalService) validateSchedule(f domain.Fields) error {
+	now := s.clock.Now()
+	if err := f.Validate(now); err != nil {
+		return err
+	}
+	return f.ValidateRegistrationDeadline(now)
 }
 func (s *ApprovalService) Reject(ctx context.Context, a Actor, id string, version int32, reason string) (domain.Event, error) {
 	if !a.IsAdmin || len(reason) == 0 || len(reason) > 500 {

@@ -58,10 +58,23 @@ UPDATE registrations SET status='REGISTERED',promoted_at=now(),updated_at=now() 
 UPDATE events SET registered_count=registered_count+1,waitlist_count=waitlist_count-1,updated_at=now() WHERE id=$1 AND registered_count < capacity;
 
 -- name: ListMyRegistrations :many
-SELECT * FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2) ORDER BY created_at DESC LIMIT $3 OFFSET $4;
+SELECT sqlc.embed(r), e.title, e.location, e.start_at, e.end_at, e.status AS event_status,
+       CASE WHEN r.status='WAITLISTED' THEN
+         (SELECT count(*) FROM registrations w
+          WHERE w.event_id=r.event_id AND w.status='WAITLISTED' AND w.queue_seq<=r.queue_seq)
+       ELSE 0 END::bigint AS waitlist_position
+FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=sqlc.arg(student_id)
+  AND (sqlc.arg(status_filter)::text='' OR r.status::text=sqlc.arg(status_filter))
+  AND (NOT sqlc.arg(upcoming)::boolean OR e.end_at>now())
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT sqlc.arg(page_size) OFFSET sqlc.arg(page_offset);
 
 -- name: CountMyRegistrations :one
-SELECT count(*) FROM registrations WHERE student_id=$1 AND ($2='' OR status::text=$2);
+SELECT count(*) FROM registrations r JOIN events e ON e.id=r.event_id
+WHERE r.student_id=sqlc.arg(student_id)
+  AND (sqlc.arg(status_filter)::text='' OR r.status::text=sqlc.arg(status_filter))
+  AND (NOT sqlc.arg(upcoming)::boolean OR e.end_at>now());
 
 -- name: IsRegistrationWindowOpen :one
 SELECT now() >= registration_opens_at AND now() < registration_closes_at AS is_open FROM events WHERE id=$1;

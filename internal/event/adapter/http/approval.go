@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"github.com/labstack/echo/v4"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
@@ -33,6 +34,9 @@ func approvalVersion(c echo.Context) (int32, error) {
 func (h *ApprovalHandler) submit(c echo.Context) error {
 	out, err := h.service.Submit(c.Request().Context(), actor(c), c.Param("id"), 0)
 	if err != nil {
+		if errors.Is(err, domain.ErrValidation) {
+			return validationFailure(c, http.StatusUnprocessableEntity, err)
+		}
 		return failure(c, err)
 	}
 	return c.JSON(http.StatusOK, map[string]any{"data": out})
@@ -40,6 +44,9 @@ func (h *ApprovalHandler) submit(c echo.Context) error {
 func (h *ApprovalHandler) approve(c echo.Context) error {
 	out, err := h.service.Approve(c.Request().Context(), actor(c), c.Param("id"), 0)
 	if err != nil {
+		if errors.Is(err, domain.ErrValidation) {
+			return validationFailure(c, http.StatusUnprocessableEntity, err)
+		}
 		return failure(c, err)
 	}
 	return c.JSON(http.StatusOK, map[string]any{"data": out})

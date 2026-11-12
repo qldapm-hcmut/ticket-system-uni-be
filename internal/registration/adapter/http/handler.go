@@ -50,12 +50,15 @@ func mapErr(c echo.Context, err error) error {
 }
 
 func dto(r a.Registration) map[string]any {
-	return map[string]any{"id": r.ID, "eventId": r.EventID, "status": r.Status, "waitlistPosition": nil, "checkinCode": func() any {
-		if r.Status == "REGISTERED" {
-			return r.CheckinCode
-		}
-		return nil
-	}(), "createdAt": r.CreatedAt}
+	var code any
+	if r.Status == "REGISTERED" && len(r.CheckinCode) == 8 {
+		code = r.CheckinCode[:4] + "-" + r.CheckinCode[4:]
+	}
+	item := map[string]any{"id": r.ID, "eventId": r.EventID, "status": r.Status, "waitlistPosition": r.WaitlistPosition, "checkinCode": code, "createdAt": r.CreatedAt}
+	if r.Event != nil {
+		item["event"] = r.Event
+	}
+	return item
 }
 
 func (h *Handler) register(c echo.Context) error {
@@ -114,7 +117,11 @@ func (h *Handler) mine(c echo.Context) error {
 	default:
 		return mapErr(c, a.ErrValidation)
 	}
-	rows, total, err := h.s.Mine(c.Request().Context(), id, c.QueryParam("status"), page, size)
+	upcoming := c.QueryParam("upcoming")
+	if upcoming != "" && upcoming != "true" && upcoming != "false" {
+		return mapErr(c, a.ErrValidation)
+	}
+	rows, total, err := h.s.Mine(c.Request().Context(), id, c.QueryParam("status"), upcoming == "true", page, size)
 	if err != nil {
 		return mapErr(c, err)
 	}
@@ -122,5 +129,6 @@ func (h *Handler) mine(c echo.Context) error {
 	for _, r := range rows {
 		data = append(data, dto(r))
 	}
+	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(200, map[string]any{"data": data, "meta": map[string]any{"page": page, "pageSize": size, "totalItems": total, "totalPages": (total + int64(size) - 1) / int64(size)}})
 }

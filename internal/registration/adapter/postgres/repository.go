@@ -190,20 +190,33 @@ func (r *repo) Cancel(ctx context.Context, id, student string) (a.CancellationRe
 	}
 	return a.CancellationResult{Registration: cancelled, Promoted: promoted}, nil
 }
-func (r *repo) Mine(ctx context.Context, student, status string, offset, size int32) ([]a.Registration, int64, error) {
+func (r *repo) Mine(ctx context.Context, student, status string, upcoming bool, offset, size int32) ([]a.Registration, int64, error) {
 	s, err := uuid(student)
 	if err != nil {
 		return nil, 0, err
 	}
-	rows, err := r.q.ListMyRegistrations(ctx, db.ListMyRegistrationsParams{StudentID: s, Column2: status, Limit: size, Offset: offset})
+	rows, err := r.q.ListMyRegistrations(ctx, db.ListMyRegistrationsParams{
+		StudentID: s, StatusFilter: status, Upcoming: upcoming, PageSize: size, PageOffset: offset,
+	})
 	if err != nil {
 		return nil, 0, err
 	}
-	n, err := r.q.CountMyRegistrations(ctx, db.CountMyRegistrationsParams{StudentID: s, Column2: status})
+	n, err := r.q.CountMyRegistrations(ctx, db.CountMyRegistrationsParams{StudentID: s, StatusFilter: status, Upcoming: upcoming})
+	if err != nil {
+		return nil, 0, err
+	}
 	out := make([]a.Registration, 0, len(rows))
 	for _, x := range rows {
-		v, _ := mapReg(x.ID, x.EventID, x.StudentID, x.Status, x.QueueSeq, x.CheckinCode, x.CreatedAt, nil)
+		reg := x.Registration
+		v, _ := mapReg(reg.ID, reg.EventID, reg.StudentID, reg.Status, reg.QueueSeq, reg.CheckinCode, reg.CreatedAt, nil)
+		v.Event = &a.EventSummary{
+			ID: v.EventID, Title: x.Title, Location: x.Location,
+			StartAt: x.StartAt.Time, EndAt: x.EndAt.Time, Status: string(x.EventStatus),
+		}
+		if reg.Status == db.RegistrationStatusWAITLISTED {
+			v.WaitlistPosition = &x.WaitlistPosition
+		}
 		out = append(out, v)
 	}
-	return out, n, err
+	return out, n, nil
 }

@@ -32,9 +32,16 @@ import (
 
 // Auth setup runs before the HTTP lifecycle hook starts accepting requests.
 func registerAuth(lc fx.Lifecycle, e *echo.Echo, pool *pgxpool.Pool) error {
-	clientID, err := config.LoadGoogleClientID()
+	mode, err := config.LoadAuthMode()
 	if err != nil {
 		return err
+	}
+	var clientID string
+	if mode == "google" {
+		clientID, err = config.LoadGoogleClientID()
+		if err != nil {
+			return err
+		}
 	}
 	cfg, err := config.LoadAuthToken()
 	if err != nil {
@@ -56,11 +63,14 @@ func registerAuth(lc fx.Lifecycle, e *echo.Echo, pool *pgxpool.Pool) error {
 	lc.Append(fx.Hook{OnStart: func(ctx context.Context) error {
 		// Bound discovery/key fetches with an HTTP timeout while keeping the
 		// remote JWKS context alive until shutdown.
-		clientContext := oidc.ClientContext(lifetime, &http.Client{Timeout: 10 * time.Second})
-		verifier, err := googleauth.New(clientContext, clientID)
-		if err != nil {
-			cancel()
-			return err
+		var verifier application.IdentityVerifier = disabledGoogleVerifier{}
+		if mode == "google" {
+			clientContext := oidc.ClientContext(lifetime, &http.Client{Timeout: 10 * time.Second})
+			verifier, err = googleauth.New(clientContext, clientID)
+			if err != nil {
+				cancel()
+				return err
+			}
 		}
 		service := application.NewService(authpg.NewUnitOfWork(pool), verifier, tokens, kernel.SystemClock{})
 		authHandler := authhttp.New(service, tokens, authpg.NewProfileReader(pool))
@@ -77,4 +87,10 @@ func registerAuth(lc fx.Lifecycle, e *echo.Echo, pool *pgxpool.Pool) error {
 		return nil
 	}, OnStop: func(context.Context) error { cancel(); return nil }})
 	return nil
+}
+
+type disabledGoogleVerifier struct{}
+
+func (disabledGoogleVerifier) Verify(context.Context, string) (application.Identity, error) {
+	return application.Identity{}, application.ErrUnauthenticated
 }

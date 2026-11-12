@@ -479,14 +479,16 @@ Lỗi: `401 UNAUTHENTICATED` (token sai/hết hạn, sai audience/domain/hd, ema
 // 201 → Event object, status = DRAFT
 ```
 
-Validation: người gọi phải là ORGANIZER của `unitId`; `endAt > startAt`; `registrationClosesAt <= startAt`; `startAt` ở tương lai; `capacity` 1–5000.
+Validation: người gọi phải là ORGANIZER của `unitId`; `endAt > startAt`; `registrationOpensAt < registrationClosesAt <= startAt`; `startAt` và `registrationClosesAt` phải sau thời điểm hiện tại; `capacity` 1–5000. `registrationOpensAt` được phép ở quá khứ để mở đăng ký ngay. Lỗi ngày trả `400 VALIDATION_ERROR` kèm `details.fields` chỉ rõ field và lý do.
 
 **E5 `PATCH /events/{eventId}`** — header `If-Match: 3`, body là tập con field của E4 (trừ `unitId`).
 
-- DRAFT / REJECTED: sửa mọi field.
+- DRAFT / REJECTED: sửa mọi field; lịch sau khi sửa phải đáp ứng validation E4, gồm hạn đóng đăng ký ở tương lai.
 - PENDING\_APPROVAL: không cho sửa → `409 INVALID_STATE_TRANSITION` (muốn sửa thì Admin reject trước).
 - PUBLISHED: sửa được, không cần duyệt lại (Q19). Từ 60 phút trước startAt cũ không sửa được `startAt`, `endAt` hoặc `location` → 409 INVALID\_STATE\_TRANSITION. Mọi thay đổi các field này đều ghi `activity_logs (UPDATE_EVENT, isSignificant: true)` và tạo notification `EVENT_CHANGED` cho REGISTERED + WAITLISTED. Chỉ nếu thay đổi trong 24h trước startAt cũ mới cấp thêm `cancellation_exception_until = new startAt` cho những dòng REGISTERED hiện hữu, trong cùng transaction. Người đăng ký sau thời điểm sửa không được cấp ngoại lệ. Tăng `capacity` → promote tự động; giảm dưới `registeredCount` → `409 CAPACITY_BELOW_REGISTERED`.
 - CANCELLED / COMPLETED: không sửa được.
+
+PUBLISHED được giữ nguyên hạn đóng đăng ký đã qua khi sửa thông tin khác; nếu đổi `registrationClosesAt`, giá trị mới phải sau thời điểm hiện tại và không sau `startAt`.
 
 ```json
 // 200
@@ -498,9 +500,9 @@ Validation: người gọi phải là ORGANIZER của `unitId`; `endAt > startAt
 
 ### 5.3 Duyệt sự kiện
 
-**P1 `POST /events/{eventId}/submit`** — không body. DRAFT/REJECTED → PENDING\_APPROVAL, ghi log `SUBMIT`.
+**P1 `POST /events/{eventId}/submit`** — không body. Kiểm tra lại lịch theo E4 tại thời điểm gửi; nếu `startAt` hoặc `registrationClosesAt` không còn ở tương lai, trả `422 VALIDATION_ERROR` kèm `details.fields`. Hợp lệ: DRAFT/REJECTED → PENDING\_APPROVAL, ghi log `SUBMIT`.
 
-**P3 `POST /events/{eventId}/approve`** — `{ "comment": "OK" }` (tùy chọn). Kiểm tra: user có `is_admin = true`, và `userId <> createdBy`. Không phải Admin → `403 FORBIDDEN`; người duyệt trùng người tạo → `403 SELF_APPROVAL_NOT_ALLOWED`. Nếu `startAt` đã qua → `422 VALIDATION_ERROR`. Thành công: status = PUBLISHED, set `approvedBy`, `approvedAt`, `publishedAt`, notify Organizer `EVENT_APPROVED`.
+**P3 `POST /events/{eventId}/approve`** — `{ "comment": "OK" }` (tùy chọn). Kiểm tra: user có `is_admin = true`, và `userId <> createdBy`. Không phải Admin → `403 FORBIDDEN`; người duyệt trùng người tạo → `403 SELF_APPROVAL_NOT_ALLOWED`. Kiểm tra lại lịch theo E4 tại thời điểm duyệt; nếu `startAt` hoặc `registrationClosesAt` không còn ở tương lai → `422 VALIDATION_ERROR` kèm `details.fields`. Thành công: status = PUBLISHED, set `approvedBy`, `approvedAt`, `publishedAt`, notify Organizer `EVENT_APPROVED`.
 
 **P4 `POST /events/{eventId}/reject`** — `{ "reason": "Thiếu thông tin địa điểm" }` (bắt buộc). PENDING\_APPROVAL → REJECTED, lưu lý do vào events.reject\_reason và activity\_logs, notify Organizer `EVENT_REJECTED`.
 

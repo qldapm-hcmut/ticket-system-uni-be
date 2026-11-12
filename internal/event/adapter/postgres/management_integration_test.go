@@ -19,6 +19,7 @@ import (
 	eventhttp "github.com/qldapm-hcmut/ticket-system-uni/internal/event/adapter/http"
 	a "github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/shared/kernel"
 )
 
 func TestManagementLists(t *testing.T) {
@@ -80,7 +81,7 @@ func TestManagementLists(t *testing.T) {
 	exec(`INSERT INTO unit_memberships(user_id,unit_id,member_role) VALUES($1,$2,'ORGANIZER')`, owner, unit)
 	event := scalar(`INSERT INTO events(unit_id,created_by,title,location,start_at,end_at,registration_opens_at,registration_closes_at,capacity,status) VALUES($1,$2,'Lists','Campus',now()+interval '3 days',now()+interval '4 days',now()-interval '1 day',now()+interval '2 days',10,'DRAFT') RETURNING id::text`, unit, owner)
 	store := New(pool)
-	approvals := a.NewApprovalService(store)
+	approvals := a.NewApprovalService(store, kernel.SystemClock{})
 	actor := a.Actor{ID: owner, IsOrganizer: true}
 	schoolAdmin := a.Actor{ID: adminID, IsAdmin: true}
 	if _, err := approvals.Submit(ctx, actor, event, 1); err != nil {

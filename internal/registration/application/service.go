@@ -11,6 +11,8 @@ type Registration struct {
 	ID, EventID, StudentID, Status, CheckinCode string
 	QueueSeq                                    int64
 	CreatedAt                                   time.Time
+	Event                                       *EventSummary
+	WaitlistPosition                            *int64
 }
 type CancellationResult struct {
 	Registration Registration
@@ -32,7 +34,7 @@ type RegistrationRepository interface {
 	Register(context.Context, string, string) (Registration, error)
 	Active(context.Context, string, string) (Registration, error)
 	Cancel(context.Context, string, string) (CancellationResult, error)
-	Mine(context.Context, string, string, int32, int32) ([]Registration, int64, error)
+	Mine(context.Context, string, string, bool, int32, int32) ([]Registration, int64, error)
 }
 type UnitOfWork interface {
 	shared.UnitOfWork[RegistrationRepository]
@@ -64,12 +66,12 @@ func (s *Service) Cancel(ctx context.Context, student, id string) (CancellationR
 	})
 	return out, err
 }
-func (s *Service) Mine(ctx context.Context, student, status string, page, size int32) ([]Registration, int64, error) {
+func (s *Service) Mine(ctx context.Context, student, status string, upcoming bool, page, size int32) ([]Registration, int64, error) {
 	var out []Registration
 	var count int64
 	err := s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
 		var e error
-		out, count, e = r.Mine(ctx, student, status, (page-1)*size, size)
+		out, count, e = r.Mine(ctx, student, status, upcoming, (page-1)*size, size)
 		return e
 	})
 	return out, count, err
