@@ -58,6 +58,7 @@ type Querier interface {
 	GetEventForUpdate(ctx context.Context, id pgtype.UUID) (Event, error)
 	GetEventUnit(ctx context.Context, id pgtype.UUID) (GetEventUnitRow, error)
 	GetManagementScope(ctx context.Context, arg GetManagementScopeParams) (pgtype.UUID, error)
+	GetMyActiveRegistrationRef(ctx context.Context, arg GetMyActiveRegistrationRefParams) (GetMyActiveRegistrationRefRow, error)
 	GetOwnedRegistrationView(ctx context.Context, arg GetOwnedRegistrationViewParams) (GetOwnedRegistrationViewRow, error)
 	GetRegistration(ctx context.Context, id pgtype.UUID) (Registration, error)
 	GetRegistrationByCheckinCode(ctx context.Context, arg GetRegistrationByCheckinCodeParams) (Registration, error)

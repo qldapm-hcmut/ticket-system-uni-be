@@ -19,6 +19,7 @@ import (
 	eventhttp "github.com/qldapm-hcmut/ticket-system-uni/internal/event/adapter/http"
 	a "github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/shared/kernel"
 )
 
 type renderSequenceClock struct{ times []time.Time }
@@ -125,7 +126,7 @@ func TestManagementLists(t *testing.T) {
 		}
 		exec(`DELETE FROM events WHERE title LIKE 'Render %'`)
 	})
-	approvals := a.NewApprovalService(store)
+	approvals := a.NewApprovalService(store, kernel.SystemClock{})
 	actor := a.Actor{ID: owner, IsOrganizer: true}
 	schoolAdmin := a.Actor{ID: adminID, IsAdmin: true}
 	if _, err := approvals.Submit(ctx, actor, event, 1); err != nil {

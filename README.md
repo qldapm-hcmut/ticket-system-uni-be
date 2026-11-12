@@ -61,7 +61,8 @@ Cần Go theo `go.mod`, Make và Podman với Compose provider (`podman compose`
 | --- | --- | --- | --- |
 | `DATABASE_URL` | Bắt buộc | Bắt buộc | Kết nối PostgreSQL; không có mặc định ở ứng dụng |
 | `HTTP_ADDR` | Tùy chọn | Được kiểm tra bởi config dùng chung | Mặc định `:3000`, định dạng `host:port`; worker không mở HTTP |
-| `GOOGLE_CLIENT_ID` | Bắt buộc | Không dùng | Google OAuth client ID, không có khoảng trắng đầu/cuối |
+| `AUTH_MODE` | Tùy chọn | Không dùng | `google` mặc định; `local` chỉ dành cho demo |
+| `GOOGLE_CLIENT_ID` | Bắt buộc khi `AUTH_MODE=google` | Không dùng | Google OAuth client ID, không có khoảng trắng đầu/cuối |
 | `JWT_SECRET` | Bắt buộc | Không dùng | Khóa ký token, ít nhất 32 byte không tính khoảng trắng đầu/cuối |
 | `QR_HMAC_SECRET` | Bắt buộc | Không dùng | Khóa ký QR độc lập, ít nhất 32 byte không tính khoảng trắng đầu/cuối |
 
@@ -71,11 +72,27 @@ Với Google, cấu hình OAuth consent screen/audience và OAuth client cho fro
 
 ```sh
 cp .env.example .env
-# Điền GOOGLE_CLIENT_ID, JWT_SECRET, QR_HMAC_SECRET và cấu hình DB local trước khi chạy API.
+# Giữ AUTH_MODE=local cho demo; điền JWT_SECRET, QR_HMAC_SECRET và cấu hình DB local.
 make db-up
 make migrate-up
 make run
 ```
+
+Với `AUTH_MODE=local`, tạo tài khoản demo và lấy access token bằng một trong các lệnh sau.
+Lệnh chỉ chạy với database ở localhost. Seed có thể chạy lại và giữ các tài khoản đã tồn tại.
+
+```sh
+make dev-token ROLE=student
+make dev-token ROLE=organizer
+make dev-token ROLE=admin
+```
+
+Dán token vào tab **Dán token trực tiếp** ở màn đăng nhập frontend, bỏ trống refresh token.
+Token có hiệu lực 8 giờ. Chạy lại lệnh để lấy token mới. Organizer demo thuộc đơn vị
+**Demo Event Unit**, chọn đơn vị này khi tạo sự kiện.
+
+Khi dùng Google thật, đặt `AUTH_MODE=google` và điền cùng OAuth Client ID vào
+`GOOGLE_CLIENT_ID` của backend và `VITE_GOOGLE_CLIENT_ID` của frontend.
 
 Chạy worker trong terminal khác:
 
@@ -103,6 +120,35 @@ curl http://localhost:3000/health/ready
 - `/health/live`: process đang phục vụ HTTP.
 - `/health/ready`: kiểm tra kết nối PostgreSQL, không lộ chi tiết kết nối.
 - API và worker dừng qua SIGINT/SIGTERM, có quản lý shutdown qua lifecycle.
+
+## Chạy toàn bộ bằng Docker và mở trên điện thoại
+
+Đặt hai repo cạnh nhau dưới tên `ticket-system-uni-be` và `ticket-system-uni-fe`.
+Điền `DOCKER_DATABASE_URL`, `JWT_SECRET`, `QR_HMAC_SECRET` trong `.env`, rồi chạy từ repo backend.
+
+```sh
+docker compose -f compose.yaml -f compose.host.yaml up -d --build --wait
+```
+
+Compose khởi động PostgreSQL, áp dụng migration, chạy API, worker và frontend Nginx.
+Web mặc định mở ở cổng `5174`. Điện thoại cùng Wi-Fi mở `http://<IP-LAN-của-PC>:5174`.
+Cho phép TCP 5174 qua firewall trên mạng LAN. `WEB_PORT` đổi cổng và `WEB_BIND_ADDRESS`
+chọn địa chỉ bind (mặc định `0.0.0.0`). Frontend chuyển tiếp `/api/v1` tới API trong Docker.
+
+Trên Windows dùng WSL mirrored, mở TCP 5174 trong cả Windows Firewall và Hyper-V Firewall,
+giới hạn nguồn theo subnet Wi-Fi. Nếu máy Windows không truy cập được web bằng IP LAN
+của chính nó, đặt `hostAddressLoopback=true` dưới `[experimental]` trong `.wslconfig`,
+rồi khởi động lại WSL và Docker.
+
+Camera trên điện thoại cần HTTPS với chứng chỉ được tin cậy.
+Nếu PC và điện thoại đã dùng Tailscale, có thể tạo địa chỉ HTTPS riêng cho web này.
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:5174
+```
+
+Mở URL HTTPS do lệnh trả về trên điện thoại đã kết nối cùng tailnet.
+Đăng nhập local bằng access token demo như hướng dẫn ở trên.
 
 ## Lệnh phát triển
 
