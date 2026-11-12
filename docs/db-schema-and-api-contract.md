@@ -426,6 +426,12 @@ Frontend lấy ID token qua Google Identity Services; gửi qua HTTPS tới back
 
 Lỗi: `401 UNAUTHENTICATED` (token sai/hết hạn, sai audience/domain/hd, email chưa xác minh, xung đột liên kết hoặc `isActive = false`). JWT payload: `sub`, `exp`. Vai trò (MSSV, `is_admin`, đơn vị được giao) không nhét vào token mà tra DB mỗi request để đổi quyền có hiệu lực ngay. Response trả `roles` là mảng suy ra, ví dụ `["STUDENT","ORGANIZER"]`, để frontend hiển thị menu.
 
+**A2 `POST /auth/refresh`**
+
+Request `{ "refreshToken": "..." }`; response `200` có cùng cấu trúc `data: AuthTokens` như A1: `accessToken`, refresh token mới, `expiresIn` và `user` đầy đủ (roles/units hiện tại đọc từ DB). Response thành công có `Cache-Control: no-store`. Identity lấy từ session nội bộ đã xác thực, không từ client hay vai trò trong JWT. Session hết hạn/đã thu hồi/replay hoặc user inactive trả `401 UNAUTHENTICATED`; consume session cũ, kiểm tra active và tạo session mới trong cùng transaction, lỗi trước commit rollback toàn bộ.
+
+Đọc profile để dựng response diễn ra **sau khi rotation commit**, cùng cách A1 đang đọc profile. Lỗi hạ tầng khi đọc profile trả `500 INTERNAL_ERROR`; user bị khóa/xóa trước lần đọc này trả `401 UNAUTHENTICATED`. Không trả token/profile khi lỗi, nhưng không rollback rotation đã commit: token cũ đã bị tiêu thụ, client phải đăng nhập lại thay vì retry token cũ. Đây là tradeoff giữ transaction auth nhỏ; profile gồm user và memberships đọc hiện tại, không hứa snapshot nguyên tử với rotation hay giữa các lần đọc. Logout tiếp tục thu hồi session của đúng user đã xác thực.
+
 ### 5.1a Quản trị đơn vị và người dùng (U2–U5)
 
 Các API `/admin/*` yêu cầu tài khoản active có `is_admin = true`, không yêu cầu membership đơn vị. Quyền được kiểm tra lại từ DB; API không cấp `is_admin` hoặc MSSV.

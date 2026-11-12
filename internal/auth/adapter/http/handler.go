@@ -14,8 +14,8 @@ import (
 )
 
 type Service interface {
-	Login(context.Context, string) (application.LoginResult, error)
-	Refresh(context.Context, string) (application.Tokens, error)
+	Login(context.Context, string) (application.AuthResult, error)
+	Refresh(context.Context, string) (application.AuthResult, error)
 	Logout(context.Context, string, string) error
 }
 type AccessVerifier interface{ VerifyAccessToken(string) (string, error) }
@@ -109,8 +109,16 @@ func (h *Handler) refresh(c echo.Context) error {
 	if err != nil {
 		return respondError(c, err)
 	}
+	// Rotation has committed. A profile failure must not expose tokens, but
+	// cannot restore the consumed session; the client must sign in again.
+	profile, err := h.profiles.ReadProfile(c.Request().Context(), result.User.ID)
+	if err != nil {
+		return respondError(c, err)
+	}
+	data := tokenDTO(result.Tokens)
+	data["user"] = profileDTO(profile)
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.JSON(200, map[string]any{"data": tokenDTO(result)})
+	return c.JSON(200, map[string]any{"data": data})
 }
 func (h *Handler) logout(c echo.Context) error {
 	var body struct {

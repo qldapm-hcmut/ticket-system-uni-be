@@ -45,22 +45,22 @@ func (s *Service) issue(ctx context.Context, r Repository, user User, now time.T
 	return Tokens{AccessToken: access, RefreshToken: refresh, ExpiresIn: int(accessLifetime / time.Second)}, nil
 }
 
-func (s *Service) Login(ctx context.Context, idToken string) (LoginResult, error) {
+func (s *Service) Login(ctx context.Context, idToken string) (AuthResult, error) {
 	if strings.TrimSpace(idToken) == "" {
-		return LoginResult{}, ErrUnauthenticated
+		return AuthResult{}, ErrUnauthenticated
 	}
 	// External verification must finish before beginning a database transaction.
 	identity, err := s.verifier.Verify(ctx, idToken)
 	if err != nil {
 		if ctx.Err() != nil {
-			return LoginResult{}, ctx.Err()
+			return AuthResult{}, ctx.Err()
 		}
-		return LoginResult{}, ErrUnauthenticated
+		return AuthResult{}, ErrUnauthenticated
 	}
 	if identity.Sub == "" || identity.Email == "" {
-		return LoginResult{}, ErrUnauthenticated
+		return AuthResult{}, ErrUnauthenticated
 	}
-	var result LoginResult
+	var result AuthResult
 	// One bounded retry in a fresh transaction handles a competing first login.
 	for attempt := 0; attempt < 2; attempt++ {
 		err = s.uow.Do(ctx, func(ctx context.Context, r Repository) error {
@@ -88,7 +88,7 @@ func (s *Service) Login(ctx context.Context, idToken string) (LoginResult, error
 			if err != nil {
 				return err
 			}
-			result = LoginResult{Tokens: tokens, User: user}
+			result = AuthResult{Tokens: tokens, User: user}
 			return nil
 		})
 		if !errors.Is(err, ErrIdentityConflict) && !errors.Is(err, ErrNotFound) {
@@ -96,16 +96,16 @@ func (s *Service) Login(ctx context.Context, idToken string) (LoginResult, error
 		}
 	}
 	if err != nil {
-		return LoginResult{}, authError(err)
+		return AuthResult{}, authError(err)
 	}
 	return result, nil
 }
 
-func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
+func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult, error) {
 	if strings.TrimSpace(refreshToken) == "" {
-		return Tokens{}, ErrUnauthenticated
+		return AuthResult{}, ErrUnauthenticated
 	}
-	var result Tokens
+	var result AuthResult
 	err := s.uow.Do(ctx, func(ctx context.Context, r Repository) error {
 		now := s.clock.Now()
 		session, err := r.ConsumeSession(ctx, s.tokens.HashRefreshToken(refreshToken), now)
@@ -119,11 +119,15 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, err
 		if !user.IsActive {
 			return ErrUnauthenticated
 		}
-		result, err = s.issue(ctx, r, user, now)
-		return err
+		tokens, err := s.issue(ctx, r, user, now)
+		if err != nil {
+			return err
+		}
+		result = AuthResult{Tokens: tokens, User: user}
+		return nil
 	})
 	if err != nil {
-		return Tokens{}, authError(err)
+		return AuthResult{}, authError(err)
 	}
 	return result, nil
 }

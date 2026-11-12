@@ -47,14 +47,19 @@ func TestIssuanceFailuresDoNotExposeTokens(t *testing.T) {
 				var result Tokens
 				var err error
 				if operation == "login" {
-					var login LoginResult
+					var login AuthResult
 					login, err = s.Login(context.Background(), "google")
 					result = login.Tokens
 					if login.User.ID != "" {
 						t.Fatal("user leaked on failure")
 					}
 				} else {
-					result, err = s.Refresh(context.Background(), "refresh")
+					var refresh AuthResult
+					refresh, err = s.Refresh(context.Background(), "refresh")
+					result = refresh.Tokens
+					if refresh.User.ID != "" {
+						t.Fatal("user leaked on failure")
+					}
 				}
 				if !errors.Is(err, failure) || result != (Tokens{}) || !u.rolledBack {
 					t.Fatalf("unexpected result %+v error %v", result, err)

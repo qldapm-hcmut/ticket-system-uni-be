@@ -32,6 +32,8 @@ type fakeRepo struct {
 	createErr       error
 	sessionErr      error
 	consumeErr      error
+	userErr         error
+	foundUserID     string
 	linked, created bool
 	consumed        bool
 	hash            string
@@ -43,7 +45,10 @@ func (r *fakeRepo) FindUserBySub(context.Context, string) (User, error) { return
 func (r *fakeRepo) FindUserByEmail(context.Context, string) (User, error) {
 	return r.byEmail, r.emailErr
 }
-func (r *fakeRepo) FindUserByID(context.Context, string) (User, error) { return r.bySub, nil }
+func (r *fakeRepo) FindUserByID(_ context.Context, id string) (User, error) {
+	r.foundUserID = id
+	return r.bySub, r.userErr
+}
 func (r *fakeRepo) CreateUser(context.Context, string, string, string) (User, error) {
 	r.created = true
 	return User{ID: "user", IsActive: true}, r.createErr
@@ -140,25 +145,36 @@ func TestVerifierFailureDoesNotOpenTransaction(t *testing.T) {
 }
 func TestRefresh(t *testing.T) {
 	for _, tc := range []struct {
-		name                   string
-		consumeErr, sessionErr error
-		active                 bool
+		name                            string
+		consumeErr, sessionErr, userErr error
+		active                          bool
 	}{
 		{name: "success", active: true}, {name: "expired or replay", consumeErr: ErrNotFound, active: true},
 		{name: "disabled", active: false}, {name: "replacement fails", active: true, sessionErr: errors.New("insert failed")},
+		{name: "user missing", userErr: ErrNotFound}, {name: "user lookup fails", userErr: errors.New("lookup failed")},
+		{name: "empty token", active: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &fakeRepo{bySub: User{ID: "user", IsActive: tc.active}, consumeErr: tc.consumeErr, sessionErr: tc.sessionErr}
+			r := &fakeRepo{bySub: User{ID: "user", IsActive: tc.active, IsAdmin: true}, consumeErr: tc.consumeErr, sessionErr: tc.sessionErr, userErr: tc.userErr}
 			u := &fakeUOW{r: r}
 			s := NewService(u, verifierFake{}, tokenFake{}, fixedClock{})
-			result, err := s.Refresh(context.Background(), "old")
+			raw := "old"
+			if tc.name == "empty token" {
+				raw = " "
+			}
+			result, err := s.Refresh(context.Background(), raw)
 			if tc.name == "success" {
-				if err != nil || result.RefreshToken == "" {
-					t.Fatal(err)
+				if err != nil || result.RefreshToken != "raw-refresh" || result.AccessToken != "access" || result.ExpiresIn != 900 || result.User != r.bySub || r.foundUserID != "user" {
+					t.Fatalf("incorrect trusted session result: %+v, err=%v", result, err)
 				}
 			} else {
-				if err == nil || !u.rolledBack || result.RefreshToken != "" {
-					t.Fatal("must roll back without exposing tokens")
+				if err == nil || result != (AuthResult{}) || (tc.name != "empty token" && !u.rolledBack) {
+					t.Fatal("must fail without exposing tokens or user")
+				}
+				if tc.name == "disabled" || tc.name == "expired or replay" || tc.name == "user missing" || tc.name == "empty token" {
+					if !errors.Is(err, ErrUnauthenticated) {
+						t.Fatalf("want unauthenticated, got %v", err)
+					}
 				}
 			}
 		})

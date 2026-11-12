@@ -27,7 +27,9 @@ type Tokens struct {
 	ExpiresIn    int
 }
 
-type LoginResult struct {
+// AuthResult carries identity resolved by the authentication transaction, never
+// supplied by the client. HTTP adapters can use it to load the current profile.
+type AuthResult struct {
 	Tokens
 	User User
 }

@@ -49,7 +49,7 @@ func testLoginUseCases(t *testing.T, pool *pgxpool.Pool, uow *UnitOfWork) {
 		}
 		s := application.NewService(uow, identityStub{application.Identity{Sub: sub, Email: email, FullName: "Login"}}, localTokens{}, kernel.SystemClock{})
 		const concurrentLogins = 20
-		results := make(chan application.LoginResult, concurrentLogins)
+		results := make(chan application.AuthResult, concurrentLogins)
 		errs := make(chan error, concurrentLogins)
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -107,7 +107,7 @@ func testLoginUseCases(t *testing.T, pool *pgxpool.Pool, uow *UnitOfWork) {
 		}
 		const requests = 50
 		start := make(chan struct{})
-		results := make(chan application.Tokens, requests)
+		results := make(chan application.AuthResult, requests)
 		errs := make(chan error, requests)
 		var wg sync.WaitGroup
 		for i := 0; i < requests; i++ {
@@ -128,9 +128,12 @@ func testLoginUseCases(t *testing.T, pool *pgxpool.Pool, uow *UnitOfWork) {
 		close(results)
 		close(errs)
 		successes, rejections := 0, 0
-		var replacement application.Tokens
+		var replacement application.AuthResult
 		for r := range results {
 			successes++
+			if r.User.ID != login.User.ID {
+				t.Fatal("refresh lost trusted session identity")
+			}
 			replacement = r
 		}
 		for err := range errs {
