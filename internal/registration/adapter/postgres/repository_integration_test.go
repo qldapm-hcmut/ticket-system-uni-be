@@ -174,7 +174,7 @@ func TestRegistrationPersistence(t *testing.T) {
 	t.Run("B4 owned registrations", func(t *testing.T) {
 		testOwnedRegistrations(t, pool, user, event, seed, counters)
 	})
-	t.Run("C2 pre-start cancellation decision commits after start", func(t *testing.T) {
+	t.Run("C2 SQL cancellation and promotion retain pre-start decision", func(t *testing.T) {
 		testCancellationDecisionBeforeStart(t, pool, owner, event, seed, counters, checkQueue)
 	})
 	t.Run("B3 cancellation on behalf", func(t *testing.T) {

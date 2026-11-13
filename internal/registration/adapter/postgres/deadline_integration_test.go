@@ -42,10 +42,12 @@ func (r cancellationDecisionRow) Scan(dest ...any) error {
 }
 
 func testCancellationDecisionBeforeStart(t *testing.T, pool *pgxpool.Pool, organizer string, event func(int, int) string, seed func(string, int) []a.Registration, counters func(string, int, int), checkQueue func(string)) {
-	// Regression target: re-reading wall time in Cancel/Promote (or using
-	// transaction-start now()) instead of reusing the post-lock decision.
-	// The test-only query wrapper keeps the real DB clock and all real SQL;
-	// after its read it moves start between decision and the remaining writes.
+	// Regression target: SQL cancellation/promotion predicates re-reading wall
+	// time instead of reusing the post-lock decision. Moving start in the DB
+	// does not change Cancel's cached event, so this does not cover a Go-level
+	// wall-clock recheck against that cached start. The test-only query wrapper
+	// keeps the real DB clock and SQL; after its read it moves start between
+	// decision and the remaining writes.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	e := event(1, 3)

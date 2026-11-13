@@ -59,35 +59,38 @@ func (e *AlreadyRegistered) Unwrap() error { return ErrAlreadyActive }
 func (s *Service) Register(ctx context.Context, student, event string) (Registration, error) {
 	var out Registration
 	err := s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
-		a, e := r.Active(ctx, event, student)
-		if e == nil && a.ID != "" {
-			return &AlreadyRegistered{RegistrationID: a.ID}
+		active, err := r.Active(ctx, event, student)
+		if err == nil && active.ID != "" {
+			return &AlreadyRegistered{RegistrationID: active.ID}
 		}
-		if e != nil && !errors.Is(e, ErrNotFound) {
-			return e
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
 		}
-		out, e = r.Register(ctx, event, student)
-		return e
+		out, err = r.Register(ctx, event, student)
+		return err
 	})
 	// An insert unique violation aborts the transaction. Do returns only after
 	// rollback; resolve the winner through a new transaction, never the failed one.
 	var duplicate *AlreadyRegistered
 	if errors.Is(err, ErrAlreadyActive) && !errors.As(err, &duplicate) {
-		readErr := s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
-			winner, e := r.Active(ctx, event, student)
-			if errors.Is(e, ErrNotFound) {
-				// The winner can be cancelled before this fresh read. The insert
-				// still conflicted; do not misreport a missing event or stale ID.
-				return ErrAlreadyActive
-			}
-			if e != nil {
-				return e
-			}
-			return &AlreadyRegistered{RegistrationID: winner.ID}
-		})
-		return Registration{}, readErr
+		return Registration{}, s.resolveRegistrationConflict(ctx, student, event)
 	}
 	return out, err
+}
+
+func (s *Service) resolveRegistrationConflict(ctx context.Context, student, event string) error {
+	return s.uow.Do(ctx, func(ctx context.Context, r RegistrationRepository) error {
+		winner, err := r.Active(ctx, event, student)
+		if errors.Is(err, ErrNotFound) {
+			// The winner can be cancelled before this fresh read. The insert
+			// still conflicted; do not misreport a missing event or stale ID.
+			return ErrAlreadyActive
+		}
+		if err != nil {
+			return err
+		}
+		return &AlreadyRegistered{RegistrationID: winner.ID}
+	})
 }
 
 // Cancel accepts an empty reason for body-less student cancellations.
