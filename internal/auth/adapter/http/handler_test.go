@@ -98,60 +98,68 @@ func TestHTTPRoutes(t *testing.T) {
 	}
 }
 
-// Omitting the profile read, using client identity, or decoding our new access
-// token (the fake verifier rejects it) must break this response contract.
-func TestRefreshResponse(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		profiles fakeProfiles
-		status   int
-		code     string
+// Both issuance routes must read the current profile using trusted identity.
+// Returning tokens before that read, accepting client identity, or omitting
+// no-store must break this contract for the shared post-commit response path.
+func TestTokenResponse(t *testing.T) {
+	for _, operation := range []struct {
+		name, path, body, accessToken, refreshToken string
 	}{
-		{name: "current profile", status: 200},
-		{name: "disabled after rotation", profiles: fakeProfiles{disabled: true}, status: 401, code: "UNAUTHENTICATED"},
-		{name: "deleted after rotation", profiles: fakeProfiles{err: application.ErrNotFound}, status: 401, code: "UNAUTHENTICATED"},
-		{name: "profile unavailable", profiles: fakeProfiles{err: errors.New("database unavailable")}, status: 500, code: "INTERNAL_ERROR"},
+		{"login", "/api/v1/auth/google", `{"idToken":"google","userId":"attacker","isAdmin":false}`, "access", "refresh"},
+		{"refresh", "/api/v1/auth/refresh", `{"refreshToken":"old","userId":"attacker","isAdmin":false}`, "new-access", "new-refresh"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			e := echo.New()
-			New(&fakeService{}, fakeAccess{}, &tc.profiles).Register(e)
-			req := httptest.NewRequest("POST", "/api/v1/auth/refresh", strings.NewReader(`{"refreshToken":"old","userId":"attacker","isAdmin":false}`))
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, req)
-			if rec.Code != tc.status {
-				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-			}
-			if tc.profiles.readID != "user" {
-				t.Fatalf("profile identity=%q, want trusted session user", tc.profiles.readID)
-			}
-			var payload struct {
-				Data  map[string]any        `json:"data"`
-				Error struct{ Code string } `json:"error"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-				t.Fatal(err)
-			}
-			if tc.status != 200 {
-				if payload.Data != nil || payload.Error.Code != tc.code || strings.Contains(rec.Body.String(), "new-refresh") || strings.Contains(rec.Body.String(), "new-access") {
-					t.Fatalf("unexpected error response: %s", rec.Body.String())
+		for _, tc := range []struct {
+			name     string
+			profiles fakeProfiles
+			status   int
+			code     string
+		}{
+			{name: "current profile", status: 200},
+			{name: "disabled after rotation", profiles: fakeProfiles{disabled: true}, status: 401, code: "UNAUTHENTICATED"},
+			{name: "deleted after rotation", profiles: fakeProfiles{err: application.ErrNotFound}, status: 401, code: "UNAUTHENTICATED"},
+			{name: "profile unavailable", profiles: fakeProfiles{err: errors.New("database unavailable")}, status: 500, code: "INTERNAL_ERROR"},
+		} {
+			t.Run(operation.name+"/"+tc.name, func(t *testing.T) {
+				e := echo.New()
+				New(&fakeService{}, fakeAccess{}, &tc.profiles).Register(e)
+				req := httptest.NewRequest("POST", operation.path, strings.NewReader(operation.body))
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				e.ServeHTTP(rec, req)
+				if rec.Code != tc.status {
+					t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 				}
-				return
-			}
-			if rec.Header().Get("Cache-Control") != "no-store" {
-				t.Fatal("refresh must not be cached")
-			}
-			want := map[string]any{
-				"accessToken": "new-access", "refreshToken": "new-refresh", "expiresIn": float64(900),
-				"user": map[string]any{
-					"id": "user", "email": "test@hcmut.edu.vn", "fullName": "Test User", "studentCode": "2210001",
-					"isAdmin": true, "isActive": true, "roles": []any{"STUDENT", "ORGANIZER", "ADMIN"},
-					"units": []any{map[string]any{"unit": map[string]any{"id": "unit", "code": "CSE", "name": "Computer Science"}, "memberRole": "ORGANIZER"}},
-				},
-			}
-			if !reflect.DeepEqual(payload.Data, want) {
-				t.Fatalf("data=%#v, want %#v", payload.Data, want)
-			}
-		})
+				if tc.profiles.readID != "user" {
+					t.Fatalf("profile identity=%q, want trusted session user", tc.profiles.readID)
+				}
+				var payload struct {
+					Data  map[string]any        `json:"data"`
+					Error struct{ Code string } `json:"error"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if tc.status != 200 {
+					if payload.Data != nil || payload.Error.Code != tc.code || strings.Contains(rec.Body.String(), operation.refreshToken) || strings.Contains(rec.Body.String(), operation.accessToken) {
+						t.Fatalf("unexpected error response: %s", rec.Body.String())
+					}
+					return
+				}
+				if rec.Header().Get("Cache-Control") != "no-store" {
+					t.Fatal("tokens must not be cached")
+				}
+				want := map[string]any{
+					"accessToken": operation.accessToken, "refreshToken": operation.refreshToken, "expiresIn": float64(900),
+					"user": map[string]any{
+						"id": "user", "email": "test@hcmut.edu.vn", "fullName": "Test User", "studentCode": "2210001",
+						"isAdmin": true, "isActive": true, "roles": []any{"STUDENT", "ORGANIZER", "ADMIN"},
+						"units": []any{map[string]any{"unit": map[string]any{"id": "unit", "code": "CSE", "name": "Computer Science"}, "memberRole": "ORGANIZER"}},
+					},
+				}
+				if !reflect.DeepEqual(payload.Data, want) {
+					t.Fatalf("data=%#v, want %#v", payload.Data, want)
+				}
+			})
+		}
 	}
 }

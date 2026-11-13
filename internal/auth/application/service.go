@@ -23,14 +23,18 @@ func NewService(uow UnitOfWork, verifier IdentityVerifier, tokens TokenService, 
 	return &Service{uow: uow, verifier: verifier, tokens: tokens, clock: clock}
 }
 
-func authError(err error) error {
+// authenticationError hides missing identities and linking conflicts, but keeps
+// infrastructure errors available for the HTTP adapter to report as server errors.
+func authenticationError(err error) error {
 	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrIdentityConflict) {
 		return ErrUnauthenticated
 	}
 	return err
 }
 
-func (s *Service) issue(ctx context.Context, r Repository, user User, now time.Time) (Tokens, error) {
+// issueTokensAndSession runs inside the caller's transaction. Tokens must not be
+// returned to the client unless the new session has committed successfully.
+func (s *Service) issueTokensAndSession(ctx context.Context, r Repository, user User, now time.Time) (Tokens, error) {
 	refresh, err := s.tokens.NewRefreshToken()
 	if err != nil {
 		return Tokens{}, err
@@ -42,7 +46,11 @@ func (s *Service) issue(ctx context.Context, r Repository, user User, now time.T
 	if _, err := r.CreateSession(ctx, user.ID, s.tokens.HashRefreshToken(refresh), now.Add(refreshLifetime)); err != nil {
 		return Tokens{}, err
 	}
-	return Tokens{AccessToken: access, RefreshToken: refresh, ExpiresIn: int(accessLifetime / time.Second)}, nil
+	return Tokens{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresIn:    int(accessLifetime / time.Second),
+	}, nil
 }
 
 func (s *Service) Login(ctx context.Context, idToken string) (AuthResult, error) {
@@ -60,31 +68,19 @@ func (s *Service) Login(ctx context.Context, idToken string) (AuthResult, error)
 	if identity.Sub == "" || identity.Email == "" {
 		return AuthResult{}, ErrUnauthenticated
 	}
+
 	var result AuthResult
 	// One bounded retry in a fresh transaction handles a competing first login.
 	for attempt := 0; attempt < 2; attempt++ {
 		err = s.uow.Do(ctx, func(ctx context.Context, r Repository) error {
-			user, err := r.FindUserBySub(ctx, identity.Sub)
-			if errors.Is(err, ErrNotFound) {
-				user, err = r.FindUserByEmail(ctx, identity.Email)
-				if errors.Is(err, ErrNotFound) {
-					user, err = r.CreateUser(ctx, identity.Email, identity.FullName, identity.Sub)
-				} else if err == nil {
-					if !user.IsActive || (user.GoogleSub != "" && user.GoogleSub != identity.Sub) {
-						return ErrUnauthenticated
-					}
-					if user.GoogleSub == "" {
-						user, err = r.LinkIdentity(ctx, user.ID, identity.Sub)
-					}
-				}
-			}
+			user, err := resolveLoginUser(ctx, r, identity)
 			if err != nil {
 				return err
 			}
 			if !user.IsActive {
 				return ErrUnauthenticated
 			}
-			tokens, err := s.issue(ctx, r, user, s.clock.Now())
+			tokens, err := s.issueTokensAndSession(ctx, r, user, s.clock.Now())
 			if err != nil {
 				return err
 			}
@@ -96,9 +92,34 @@ func (s *Service) Login(ctx context.Context, idToken string) (AuthResult, error)
 		}
 	}
 	if err != nil {
-		return AuthResult{}, authError(err)
+		return AuthResult{}, authenticationError(err)
 	}
 	return result, nil
+}
+
+// resolveLoginUser first trusts Google sub. Only a verified email may link a
+// bootstrap account; a different linked sub or inactive account must not link.
+// All lookups and writes use the repository bound to the login transaction.
+func resolveLoginUser(ctx context.Context, r Repository, identity Identity) (User, error) {
+	user, err := r.FindUserBySub(ctx, identity.Sub)
+	if !errors.Is(err, ErrNotFound) {
+		return user, err
+	}
+
+	user, err = r.FindUserByEmail(ctx, identity.Email)
+	if errors.Is(err, ErrNotFound) {
+		return r.CreateUser(ctx, identity.Email, identity.FullName, identity.Sub)
+	}
+	if err != nil {
+		return User{}, err
+	}
+	if !user.IsActive || (user.GoogleSub != "" && user.GoogleSub != identity.Sub) {
+		return User{}, ErrUnauthenticated
+	}
+	if user.GoogleSub == "" {
+		return r.LinkIdentity(ctx, user.ID, identity.Sub)
+	}
+	return user, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult, error) {
@@ -107,6 +128,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult,
 	}
 	var result AuthResult
 	err := s.uow.Do(ctx, func(ctx context.Context, r Repository) error {
+		// Consume and replace atomically, using one time for expiry checks and issuance.
 		now := s.clock.Now()
 		session, err := r.ConsumeSession(ctx, s.tokens.HashRefreshToken(refreshToken), now)
 		if err != nil {
@@ -119,7 +141,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult,
 		if !user.IsActive {
 			return ErrUnauthenticated
 		}
-		tokens, err := s.issue(ctx, r, user, now)
+		tokens, err := s.issueTokensAndSession(ctx, r, user, now)
 		if err != nil {
 			return err
 		}
@@ -127,7 +149,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult,
 		return nil
 	})
 	if err != nil {
-		return AuthResult{}, authError(err)
+		return AuthResult{}, authenticationError(err)
 	}
 	return result, nil
 }
