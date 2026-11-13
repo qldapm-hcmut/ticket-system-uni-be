@@ -15,7 +15,7 @@ WITH locked AS (
                 THEN 'REGISTERED'::registration_status
             ELSE 'WAITLISTED'::registration_status
         END,
-        upper(substr(encode(gen_random_bytes(4), 'hex'), 1, 8))
+        sqlc.arg(checkin_code)::text
     FROM locked e
     WHERE e.status = 'PUBLISHED'
         AND now() >= e.registration_opens_at

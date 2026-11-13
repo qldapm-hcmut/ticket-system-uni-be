@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -17,20 +19,22 @@ import (
 type Store struct {
 	runner *platform.TransactionRunner
 	q      *db.Queries
+	random io.Reader
 }
 
 func New(pool *pgxpool.Pool) *Store {
-	return &Store{runner: platform.NewTransactionRunner(pool), q: db.New(pool)}
+	return &Store{runner: platform.NewTransactionRunner(pool), q: db.New(pool), random: rand.Reader}
 }
 func (s *Store) Do(ctx context.Context, fn func(context.Context, a.RegistrationRepository) error) error {
 	return s.runner.Do(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		return translate(fn(ctx, &repo{q: s.q.WithTx(tx), tx: tx}))
+		return translate(fn(ctx, &repo{q: s.q.WithTx(tx), tx: tx, random: s.random}))
 	})
 }
 
 type repo struct {
-	q  *db.Queries
-	tx pgx.Tx
+	q      *db.Queries
+	tx     pgx.Tx
+	random io.Reader
 }
 
 func translate(err error) error {
@@ -77,7 +81,7 @@ func (r *repo) Register(ctx context.Context, event, student string) (a.Registrat
 	if err != nil {
 		return a.Registration{}, err
 	}
-	x, err := r.q.RegisterStudent(ctx, db.RegisterStudentParams{ID: e, StudentID: s})
+	x, err := r.insertRegistration(ctx, db.RegisterStudentParams{ID: e, StudentID: s})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Active has already acquired the event lock in this transaction.
 		// Distinguish a closed registration window from an exhausted waitlist.
