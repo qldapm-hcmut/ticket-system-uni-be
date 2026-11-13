@@ -29,9 +29,10 @@ func failure(c echo.Context, err error) error {
 	return c.JSON(status, map[string]any{"error": map[string]string{"code": code, "message": http.StatusText(status)}})
 }
 func (h *Handler) list(c echo.Context) error {
-	f := a.Filter{Page: 1, PageSize: 20}
-	for name, dst := range map[string]*int32{"page": &f.Page, "pageSize": &f.PageSize} {
-		if raw, ok := c.QueryParams()[name]; ok {
+	filter := a.Filter{Page: 1, PageSize: 20}
+	params := c.QueryParams()
+	for name, destination := range map[string]*int32{"page": &filter.Page, "pageSize": &filter.PageSize} {
+		if raw, ok := params[name]; ok {
 			if len(raw) != 1 {
 				return failure(c, a.ErrValidation)
 			}
@@ -39,21 +40,31 @@ func (h *Handler) list(c echo.Context) error {
 			if err != nil {
 				return failure(c, a.ErrValidation)
 			}
-			*dst = int32(n)
+			*destination = int32(n)
 		}
 	}
-	if raw, ok := c.QueryParams()["unread"]; ok {
+	if raw, ok := params["unread"]; ok {
 		if len(raw) != 1 || raw[0] != "true" && raw[0] != "false" {
 			return failure(c, a.ErrValidation)
 		}
-		f.Unread = raw[0] == "true"
+		filter.Unread = raw[0] == "true"
 	}
-	result, err := h.service.List(c.Request().Context(), c.Get("auth.profile").(auth.Profile).ID, f)
+	result, err := h.service.List(c.Request().Context(), c.Get("auth.profile").(auth.Profile).ID, filter)
 	if err != nil {
 		return failure(c, err)
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.JSON(200, map[string]any{"data": result.Items, "meta": map[string]any{"page": f.Page, "pageSize": f.PageSize, "totalItems": result.TotalItems, "totalPages": (result.TotalItems + int64(f.PageSize) - 1) / int64(f.PageSize), "unreadCount": result.UnreadCount}})
+	totalPages := (result.TotalItems + int64(filter.PageSize) - 1) / int64(filter.PageSize)
+	return c.JSON(200, map[string]any{
+		"data": result.Items,
+		"meta": map[string]any{
+			"page":        filter.Page,
+			"pageSize":    filter.PageSize,
+			"totalItems":  result.TotalItems,
+			"totalPages":  totalPages,
+			"unreadCount": result.UnreadCount,
+		},
+	})
 }
 func (h *Handler) read(c echo.Context) error {
 	kind, _, err := mime.ParseMediaType(c.Request().Header.Get("Content-Type"))
@@ -64,18 +75,23 @@ func (h *Handler) read(c echo.Context) error {
 		IDs *[]string `json:"ids"`
 		All *bool     `json:"all"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 16384))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 16384))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
 		return failure(c, a.ErrValidation)
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return failure(c, a.ErrValidation)
 	}
-	if (body.IDs == nil) == (body.All == nil) || body.All != nil && !*body.All {
+	hasIDs, hasAll := body.IDs != nil, body.All != nil
+	// Exactly one option must be present; an explicit all=false is not valid.
+	if hasIDs == hasAll {
 		return failure(c, a.ErrValidation)
 	}
-	options := a.ReadOptions{All: body.All != nil}
+	if hasAll && !*body.All {
+		return failure(c, a.ErrValidation)
+	}
+	options := a.ReadOptions{All: hasAll}
 	if body.IDs != nil {
 		options.IDs = *body.IDs
 	}

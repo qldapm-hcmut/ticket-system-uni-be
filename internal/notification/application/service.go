@@ -40,22 +40,30 @@ type Store interface {
 type Service struct{ store Store }
 
 func New(store Store) *Service { return &Service{store} }
-func (s *Service) List(ctx context.Context, actor string, f Filter) (List, error) {
-	if f.Page < 1 || f.PageSize < 1 || f.PageSize > 100 || (int64(f.Page)-1)*int64(f.PageSize) > 2147483647 {
+func (s *Service) List(ctx context.Context, actor string, filter Filter) (List, error) {
+	if filter.Page < 1 || filter.PageSize < 1 || filter.PageSize > 100 {
 		return List{}, ErrValidation
 	}
-	return s.store.List(ctx, actor, f)
+	// The SQL offset is int32; calculate in int64 before checking its limit.
+	offset := (int64(filter.Page) - 1) * int64(filter.PageSize)
+	if offset > 2147483647 {
+		return List{}, ErrValidation
+	}
+	return s.store.List(ctx, actor, filter)
 }
-func (s *Service) MarkRead(ctx context.Context, actor string, o ReadOptions) (ReadResult, error) {
-	if o.All && len(o.IDs) > 0 || !o.All && len(o.IDs) == 0 || len(o.IDs) > 100 {
+
+func (s *Service) MarkRead(ctx context.Context, actor string, options ReadOptions) (ReadResult, error) {
+	hasIDs := len(options.IDs) > 0
+	// Choose either mark-all or a nonempty list of IDs, never both.
+	if options.All == hasIDs || len(options.IDs) > 100 {
 		return ReadResult{}, ErrValidation
 	}
-	for _, id := range o.IDs {
+	for _, id := range options.IDs {
 		if !validUUID(id) {
 			return ReadResult{}, ErrValidation
 		}
 	}
-	return s.store.MarkRead(ctx, actor, o)
+	return s.store.MarkRead(ctx, actor, options)
 }
 func validUUID(s string) bool {
 	if len(s) != 36 {

@@ -3,12 +3,13 @@ package http
 import (
 	"context"
 	"errors"
-	"github.com/labstack/echo/v4"
-	auth "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/application"
-	a "github.com/qldapm-hcmut/ticket-system-uni/internal/notification/application"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/labstack/echo/v4"
+	auth "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/application"
+	a "github.com/qldapm-hcmut/ticket-system-uni/internal/notification/application"
 )
 
 type fakeStore struct {
@@ -50,8 +51,11 @@ func TestNotificationHTTP(t *testing.T) {
 		status             int
 	}{
 		{"GET", "", "", 200}, {"GET", "?unread=true&page=2&pageSize=1", "", 200},
+		{"GET", "?unread=false", "", 200}, {"GET", "?unread=true&unread=false", "", 400}, {"GET", "?pageSize=1&pageSize=2", "", 400},
 		{"GET", "?page=0", "", 400}, {"GET", "?pageSize=101", "", 400}, {"GET", "?page=2147483647&pageSize=100", "", 400}, {"GET", "?page=no", "", 400}, {"GET", "?unread=1", "", 400}, {"GET", "?unread=", "", 400}, {"GET", "?page=1&page=2", "", 400},
 		{"POST", "/read", `{"all":true}`, 200}, {"POST", "/read", `{"ids":["00000000-0000-0000-0000-000000000001"]}`, 200},
+		{"POST", "/read", `{"ids":null,"all":true}`, 200}, {"POST", "/read", `{"ids":["00000000-0000-0000-0000-000000000001"],"all":null}`, 200},
+		{"POST", "/read", `{"ids":["00000000-0000-0000-0000-000000000001"],"all":false}`, 400}, {"POST", "/read", `{"all":true} null`, 400},
 		{"POST", "/read", `{}`, 400}, {"POST", "/read", `{"all":false}`, 400}, {"POST", "/read", `{"ids":[]}`, 400}, {"POST", "/read", `{"ids":["bad"]}`, 400}, {"POST", "/read", `{"all":true,"ids":[]}`, 400}, {"POST", "/read", `{"all":true,"userId":"other"}`, 400}, {"POST", "/read", `{"all":true} {}`, 400}, {"POST", "/read", `null`, 400}, {"POST", "/read", `{`, 400},
 	} {
 		t.Run(tc.method+tc.path+tc.body, func(t *testing.T) {
@@ -77,9 +81,19 @@ func TestNotificationHTTP(t *testing.T) {
 				if !strings.Contains(rec.Body.String(), `"data":[]`) || !strings.Contains(rec.Body.String(), `"unreadCount":2`) {
 					t.Fatal(rec.Body.String())
 				}
-				if tc.path == "" && f.filter != (a.Filter{Page: 1, PageSize: 20}) {
-					t.Fatal(f.filter)
+				want := a.Filter{Page: 1, PageSize: 20}
+				if tc.path == "?unread=true&page=2&pageSize=1" {
+					want = a.Filter{Page: 2, PageSize: 1, Unread: true}
 				}
+				if f.filter != want {
+					t.Fatalf("filter=%+v want %+v", f.filter, want)
+				}
+			} else if strings.Contains(tc.body, `"all":true`) {
+				if !f.options.All || len(f.options.IDs) != 0 {
+					t.Fatal(f.options)
+				}
+			} else if f.options.All || len(f.options.IDs) != 1 || f.options.IDs[0] != "00000000-0000-0000-0000-000000000001" {
+				t.Fatal(f.options)
 			}
 		})
 	}

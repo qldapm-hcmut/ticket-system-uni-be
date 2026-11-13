@@ -30,39 +30,53 @@ func New(pool *pgxpool.Pool, clock kernel.Clock) *Store {
 
 // Each report uses one snapshot, including authorization. Export bytes are not
 // released to the caller until the audit transaction commits successfully.
-func (s *Store) snapshot(ctx context.Context, actor, event string, fn func(*db.Queries, db.GetReportEventRow, pgtype.UUID) error) error {
-	var aid, eid pgtype.UUID
-	if aid.Scan(actor) != nil || eid.Scan(event) != nil || !aid.Valid || !eid.Valid {
+func (s *Store) snapshot(ctx context.Context, actor, event string, run func(*db.Queries, db.GetReportEventRow, pgtype.UUID) error) error {
+	var actorID, eventID pgtype.UUID
+	if actorID.Scan(actor) != nil || eventID.Scan(event) != nil || !actorID.Valid || !eventID.Valid {
 		return a.ErrNotFound
 	}
 	return s.runner.Do(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"); err != nil {
 			return err
 		}
-		q := db.New(tx)
-		e, err := q.GetReportEvent(ctx, db.GetReportEventParams{ActorID: aid, EventID: eid})
+		queries := db.New(tx)
+		reportEvent, err := queries.GetReportEvent(ctx, db.GetReportEventParams{ActorID: actorID, EventID: eventID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return a.ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return fn(q, e, aid)
+		return run(queries, reportEvent, actorID)
 	})
 }
+
 func (s *Store) Summary(ctx context.Context, actor, event string) (out a.Summary, err error) {
-	err = s.snapshot(ctx, actor, event, func(q *db.Queries, e db.GetReportEventRow, _ pgtype.UUID) error {
-		r, err := q.GetReportSummary(ctx, e.ID)
+	err = s.snapshot(ctx, actor, event, func(queries *db.Queries, reportEvent db.GetReportEventRow, _ pgtype.UUID) error {
+		counts, err := queries.GetReportSummary(ctx, reportEvent.ID)
 		if err != nil {
 			return err
 		}
 		now := s.clock.Now()
-		if !now.Before(e.StartAt.Time) {
-			r.Waitlisted = 0
+		if !now.Before(reportEvent.StartAt.Time) {
+			counts.Waitlisted = 0
 		}
-		out = a.Summary{Capacity: e.Capacity, Registered: r.Registered, Waitlisted: r.Waitlisted, Cancelled: r.Cancelled, Promoted: r.Promoted, CheckedIn: r.CheckedIn, ByMethod: map[string]int64{"QR": r.Qr, "CODE": r.Code, "MANUAL": r.Manual}, GeneratedAt: now}
-		if r.Registered > 0 {
-			out.AttendanceRate = float64(r.CheckedIn) / float64(r.Registered)
+		out = a.Summary{
+			Capacity:   reportEvent.Capacity,
+			Registered: counts.Registered,
+			Waitlisted: counts.Waitlisted,
+			Cancelled:  counts.Cancelled,
+			Promoted:   counts.Promoted,
+			CheckedIn:  counts.CheckedIn,
+			ByMethod: map[string]int64{
+				"QR":     counts.Qr,
+				"CODE":   counts.Code,
+				"MANUAL": counts.Manual,
+			},
+			GeneratedAt: now,
+		}
+		if counts.Registered > 0 {
+			out.AttendanceRate = float64(counts.CheckedIn) / float64(counts.Registered)
 		}
 		return nil
 	})
@@ -71,42 +85,58 @@ func (s *Store) Summary(ctx context.Context, actor, event string) (out a.Summary
 
 // Prevent spreadsheet formula execution even for values prefixed by whitespace.
 func safeCell(value string) string {
+	if strings.HasPrefix(value, "\t") || strings.HasPrefix(value, "\r") || strings.HasPrefix(value, "\n") {
+		return "'" + value
+	}
 	trimmed := strings.TrimLeft(value, " \t\r\n")
-	if strings.HasPrefix(value, "\t") || strings.HasPrefix(value, "\r") || strings.HasPrefix(value, "\n") || (len(trimmed) > 0 && strings.ContainsRune("=+-@", rune(trimmed[0]))) {
+	if len(trimmed) > 0 && strings.ContainsRune("=+-@", rune(trimmed[0])) {
 		return "'" + value
 	}
 	return value
 }
+
 func renderCSV(rows []db.ListReportRegistrationsRow) ([]byte, error) {
-	var b bytes.Buffer
-	b.WriteString("\xef\xbb\xbf")
-	w := csv.NewWriter(&b)
-	w.UseCRLF = true
-	if err := w.Write([]string{"STT", "MSSV", "Họ tên", "Email", "Trạng thái đăng ký", "Thời gian check-in", "Phương thức"}); err != nil {
+	var buffer bytes.Buffer
+	buffer.WriteString("\xef\xbb\xbf")
+	writer := csv.NewWriter(&buffer)
+	writer.UseCRLF = true
+	if err := writer.Write([]string{"STT", "MSSV", "Họ tên", "Email", "Trạng thái đăng ký", "Thời gian check-in", "Phương thức"}); err != nil {
 		return nil, err
 	}
-	for i, r := range rows {
-		at, method := "", ""
-		if r.CheckedInAt.Valid {
-			at = r.CheckedInAt.Time.Format(time.RFC3339)
+	for i, row := range rows {
+		checkedInAt, method := "", ""
+		if row.CheckedInAt.Valid {
+			checkedInAt = row.CheckedInAt.Time.Format(time.RFC3339)
 		}
-		if r.CheckinMethod.Valid {
-			method = string(r.CheckinMethod.CheckinMethod)
+		if row.CheckinMethod.Valid {
+			method = string(row.CheckinMethod.CheckinMethod)
 		}
-		record := []string{strconv.Itoa(i + 1), r.StudentCode.String, r.FullName, r.Email, string(r.Status), at, method}
+		record := []string{
+			strconv.Itoa(i + 1),
+			row.StudentCode.String,
+			row.FullName,
+			row.Email,
+			string(row.Status),
+			checkedInAt,
+			method,
+		}
 		for j := range record {
 			record[j] = safeCell(record[j])
 		}
-		if err := w.Write(record); err != nil {
+		if err := writer.Write(record); err != nil {
 			return nil, err
 		}
 	}
-	w.Flush()
-	return b.Bytes(), w.Error()
+	writer.Flush()
+	return buffer.Bytes(), writer.Error()
 }
+
 func (s *Store) Export(ctx context.Context, actor, event, kind string) (out []byte, err error) {
-	err = s.snapshot(ctx, actor, event, func(q *db.Queries, e db.GetReportEventRow, aid pgtype.UUID) error {
-		rows, err := q.ListReportRegistrations(ctx, db.ListReportRegistrationsParams{EventID: e.ID, AttendanceOnly: kind == "attendance"})
+	err = s.snapshot(ctx, actor, event, func(queries *db.Queries, reportEvent db.GetReportEventRow, actorID pgtype.UUID) error {
+		rows, err := queries.ListReportRegistrations(ctx, db.ListReportRegistrationsParams{
+			EventID:        reportEvent.ID,
+			AttendanceOnly: kind == "attendance",
+		})
 		if err != nil {
 			return err
 		}
@@ -118,7 +148,11 @@ func (s *Store) Export(ctx context.Context, actor, event, kind string) (out []by
 		if err != nil {
 			return err
 		}
-		return q.AuditReportExport(ctx, db.AuditReportExportParams{ActorID: aid, EventID: e.ID, Metadata: metadata})
+		return queries.AuditReportExport(ctx, db.AuditReportExportParams{
+			ActorID:  actorID,
+			EventID:  reportEvent.ID,
+			Metadata: metadata,
+		})
 	})
 	if err != nil {
 		return nil, err
