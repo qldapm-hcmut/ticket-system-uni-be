@@ -323,7 +323,7 @@ func testCancellationOnBehalf(t *testing.T, pool *pgxpool.Pool, unit, organizer 
 			})
 		}
 	})
-	t.Run("blocked event lock rechecks authorization and start", func(t *testing.T) {
+	t.Run("blocked event lock rechecks authorization and deadlines", func(t *testing.T) {
 		for _, tc := range []struct {
 			name                  string
 			self, waiting, revoke bool
@@ -340,6 +340,8 @@ func testCancellationOnBehalf(t *testing.T, pool *pgxpool.Pool, unit, organizer 
 			{"owner exception across start", true, false, false, "", a.ErrCancelDeadline},
 			{"waiting owner across start", true, true, false, "", a.ErrState},
 			{"waiting organizer across start", false, true, false, "", a.ErrState},
+			{"owner across 24h cutoff", true, false, false, "cutoff", a.ErrCancelDeadline},
+			{"owner across exception expiry", true, false, false, "exception", a.ErrCancelDeadline},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -354,10 +356,16 @@ func testCancellationOnBehalf(t *testing.T, pool *pgxpool.Pool, unit, organizer 
 				if tc.self {
 					actor = reg.StudentID
 				}
-				if !tc.revoke {
-					exec(`UPDATE events SET start_at=clock_timestamp()+interval '2 seconds',end_at=now()+interval '1 hour',registration_closes_at=now()-interval '1 second' WHERE id=$1`, e)
+				if !tc.revoke && tc.scopeRevoke != "cutoff" {
+					exec(`UPDATE events
+						SET start_at = clock_timestamp() + interval '12 hours',
+							end_at = clock_timestamp() + interval '13 hours',
+							registration_closes_at = clock_timestamp() - interval '1 second'
+						WHERE id = $1`, e)
 					// Even an exception beyond start must not permit cancellation.
-					exec(`UPDATE registrations SET cancellation_exception_until=now()+interval '1 day' WHERE id=$1`, regs[0].ID)
+					exec(`UPDATE registrations
+						SET cancellation_exception_until = clock_timestamp() + interval '1 day'
+						WHERE id = $1`, regs[0].ID)
 				}
 				parent, err := pool.Begin(ctx)
 				if err != nil {
@@ -424,19 +432,43 @@ func testCancellationOnBehalf(t *testing.T, pool *pgxpool.Pool, unit, organizer 
 					exec(`UPDATE users SET is_active=false WHERE id=$1`, actor)
 					defer exec(`UPDATE users SET is_active=true WHERE id=$1`, actor)
 				} else {
-					for {
-						var started bool
-						if err := pool.QueryRow(ctx, `SELECT clock_timestamp()>=start_at FROM events WHERE id=$1`, e).Scan(&started); err != nil {
-							t.Fatal(err)
-						}
-						if started {
-							break
-						}
-						select {
-						case <-ctx.Done():
-							t.Fatal(ctx.Err())
-						case <-ticker.C:
-						}
+					// Advance the fixture boundary only after the exact waiter is
+					// observed. The waiter's transaction began before this instant;
+					// its fresh post-lock decision will be after it. No scheduling
+					// window or wall-clock sleep is needed to cross the deadline.
+					var boundary time.Time
+					if err := parent.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&boundary); err != nil {
+						t.Fatal(err)
+					}
+					switch tc.scopeRevoke {
+					case "cutoff":
+						_, err = parent.Exec(ctx, `UPDATE events
+							SET start_at = $2::timestamptz + interval '24 hours',
+								end_at = $2::timestamptz + interval '25 hours',
+								registration_closes_at = $2::timestamptz - interval '1 second'
+							WHERE id = $1`, e, boundary)
+					case "exception":
+						_, err = parent.Exec(ctx, `UPDATE registrations
+							SET cancellation_exception_until = $2
+							WHERE id = $1`, regs[0].ID, boundary)
+					default:
+						_, err = parent.Exec(ctx, `UPDATE events
+							SET start_at = $2::timestamptz,
+								end_at = $2::timestamptz + interval '1 hour',
+								registration_closes_at = $2::timestamptz - interval '1 second'
+							WHERE id = $1`, e, boundary)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					var crossed bool
+					if err := parent.QueryRow(ctx, `SELECT EXISTS (
+						SELECT 1 FROM pg_stat_activity a
+						WHERE $1 = ANY(pg_blocking_pids(a.pid))
+							AND a.xact_start < $2::timestamptz
+							AND clock_timestamp() >= $2::timestamptz
+					)`, blocker, boundary).Scan(&crossed); err != nil || !crossed {
+						t.Fatalf("deadline must cross while cancellation waits: crossed=%v err=%v", crossed, err)
 					}
 				}
 				if err := parent.Commit(ctx); err != nil {
