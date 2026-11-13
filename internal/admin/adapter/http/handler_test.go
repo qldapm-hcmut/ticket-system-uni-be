@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -18,6 +19,8 @@ type fakeStore struct {
 	calls  int
 	active bool
 	err    error
+	filter a.Filter
+	list   *a.UserList
 }
 
 func (f *fakeStore) CreateUnit(context.Context, string, a.UnitCreate) (a.Unit, error) {
@@ -28,8 +31,12 @@ func (f *fakeStore) SetMembers(context.Context, string, string, []a.Member) ([]a
 	f.calls++
 	return []a.UnitMember{}, f.err
 }
-func (f *fakeStore) ListUsers(context.Context, string, a.Filter) (a.UserList, error) {
+func (f *fakeStore) ListUsers(_ context.Context, _ string, filter a.Filter) (a.UserList, error) {
 	f.calls++
+	f.filter = filter
+	if f.list != nil {
+		return *f.list, f.err
+	}
 	return a.UserList{Items: []auth.Profile{{User: auth.User{ID: id, StudentCode: "123", IsAdmin: true, IsActive: true}}}, TotalItems: 1}, f.err
 }
 func (f *fakeStore) UpdateUser(_ context.Context, _, _ string, v bool) (auth.Profile, error) {
@@ -126,6 +133,56 @@ func TestAdminHTTPValidationAndResponses(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+
+// Pin defaults, query forwarding, empty arrays and overflow-safe page totals.
+func TestListUsersPagination(t *testing.T) {
+	for _, tc := range []struct {
+		name, query  string
+		total, pages int64
+		filter       a.Filter
+	}{
+		{"defaults and empty results", "", 0, 0, a.Filter{Page: 1, PageSize: 20}},
+		{"partial final page", "?q=%25&role=ORGANIZER&page=2&pageSize=2", 5, 3, a.Filter{Q: "%", Role: "ORGANIZER", Page: 2, PageSize: 2}},
+		{"exact final page", "?page=3&pageSize=2", 6, 3, a.Filter{Page: 3, PageSize: 2}},
+		{"large total", "?pageSize=100", math.MaxInt64, 92233720368547759, a.Filter{Page: 1, PageSize: 100}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{list: &a.UserList{TotalItems: tc.total}}
+			e := setup(store, auth.Profile{User: auth.User{ID: id, IsAdmin: true, IsActive: true}})
+			response := request(e, "GET", "/api/v1/admin/users"+tc.query, "")
+			var body struct {
+				Data []json.RawMessage
+				Meta struct{ Page, PageSize, TotalItems, TotalPages int64 }
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != 200 || body.Data == nil || len(body.Data) != 0 || body.Meta.Page != tc.filter.Page || body.Meta.PageSize != tc.filter.PageSize || body.Meta.TotalItems != tc.total || body.Meta.TotalPages != tc.pages {
+				t.Fatalf("pagination response: %d %s", response.Code, response.Body.String())
+			}
+			if store.calls != 1 || store.filter != tc.filter {
+				t.Fatalf("query not preserved: %+v", store.filter)
+			}
+		})
+	}
+}
+
+func TestListUsersRejectsInvalidPaginationBeforeStore(t *testing.T) {
+	for _, query := range []string{
+		"page=1&page=2", "pageSize=1&pageSize=2", "pageSize=0", "pageSize=-1",
+		"page=9223372036854775808", "page=9223372036854775807&pageSize=2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			store := &fakeStore{}
+			e := setup(store, auth.Profile{User: auth.User{ID: id, IsAdmin: true, IsActive: true}})
+			response := request(e, "GET", "/api/v1/admin/users?"+query, "")
+			if response.Code != 400 || store.calls != 0 || !strings.Contains(response.Body.String(), "VALIDATION_ERROR") {
+				t.Fatalf("invalid query: %d %s (store calls: %d)", response.Code, response.Body.String(), store.calls)
+			}
+		})
+	}
+}
+
 func TestNonAdminDeniedEveryEndpoint(t *testing.T) {
 	for _, p := range []auth.Profile{{User: auth.User{ID: id, IsActive: true}}, {User: auth.User{ID: id, IsAdmin: true, IsActive: false}}} {
 		f := &fakeStore{}
