@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -22,9 +21,6 @@ func uuid(s string) (pgtype.UUID, error) {
 		return id, a.ErrValidation
 	}
 	return id, nil
-}
-func uuidString(id pgtype.UUID) string {
-	return fmt.Sprintf("%x-%x-%x-%x-%x", id.Bytes[0:4], id.Bytes[4:6], id.Bytes[6:8], id.Bytes[8:10], id.Bytes[10:16])
 }
 
 func (s *Store) List(ctx context.Context, actor string, filter a.Filter) (out a.List, err error) {
@@ -57,14 +53,14 @@ func (s *Store) List(ctx context.Context, actor string, filter a.Filter) (out a.
 		}
 		for _, row := range rows {
 			notification := a.Notification{
-				ID:        uuidString(row.ID),
+				ID:        row.ID.String(),
 				Type:      string(row.Type),
 				Title:     row.Title,
 				Body:      row.Body,
 				CreatedAt: row.CreatedAt.Time,
 			}
 			if row.EventID.Valid {
-				eventID := uuidString(row.EventID)
+				eventID := row.EventID.String()
 				notification.EventID = &eventID
 			}
 			if row.ReadAt.Valid {

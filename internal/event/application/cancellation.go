@@ -24,16 +24,9 @@ func (s *Service) Cancel(ctx context.Context, actor Actor, id string, version in
 	}
 	var out CancellationResult
 	err := s.uow.Do(ctx, func(ctx context.Context, r EventRepository) error {
-		e, err := r.Get(ctx, id, true)
+		e, err := organizerEvent(ctx, r, actor.ID, id)
 		if err != nil {
 			return err
-		}
-		allowed, err := r.IsOrganizer(ctx, actor.ID, e.UnitID)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			return domain.ErrNotFound
 		}
 		if version != 0 && version != e.Version {
 			return domain.ErrVersion

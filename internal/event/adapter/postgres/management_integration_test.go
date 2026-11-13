@@ -21,6 +21,14 @@ import (
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
 )
 
+type renderSequenceClock struct{ times []time.Time }
+
+func (c *renderSequenceClock) Now() time.Time {
+	at := c.times[0]
+	c.times = c.times[1:]
+	return at
+}
+
 func TestManagementLists(t *testing.T) {
 	ctx := context.Background()
 	url := os.Getenv("TEST_DATABASE_URL")
@@ -80,6 +88,43 @@ func TestManagementLists(t *testing.T) {
 	exec(`INSERT INTO unit_memberships(user_id,unit_id,member_role) VALUES($1,$2,'ORGANIZER')`, owner, unit)
 	event := scalar(`INSERT INTO events(unit_id,created_by,title,location,start_at,end_at,registration_opens_at,registration_closes_at,capacity,status) VALUES($1,$2,'Lists','Campus',now()+interval '3 days',now()+interval '4 days',now()-interval '1 day',now()+interval '2 days',10,'DRAFT') RETURNING id::text`, unit, owner)
 	store := New(pool)
+	// Both event list paths must preserve row order, empty arrays, nullable
+	// fields and the render-time boundary even when each row reads a new time.
+	t.Run("catalog and managed rendering", func(t *testing.T) {
+		start := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+		for i := 0; i < 2; i++ {
+			exec(`INSERT INTO events(unit_id,created_by,title,location,start_at,end_at,registration_opens_at,registration_closes_at,capacity,status,waitlist_count) VALUES($1,$2,$3,'Campus',$4,$5,$6,$7,10,'PUBLISHED',2)`,
+				unit, owner, fmt.Sprintf("Render %d", i), start, start.Add(time.Hour), start.Add(-time.Hour), start.Add(-time.Minute))
+		}
+		for _, managed := range []bool{false, true} {
+			clock := &renderSequenceClock{times: []time.Time{start.Add(-time.Nanosecond), start}}
+			// Catalog first reads the filter time, then reads once per row.
+			if !managed {
+				clock.times = append([]time.Time{start.Add(-time.Hour)}, clock.times...)
+			}
+			reader := NewReader(pool, clock)
+			read := func(search string) ([]map[string]any, int64, error) {
+				filter := a.Filter{Search: search, Page: 1, PageSize: 20}
+				if managed {
+					return reader.Managed(ctx, a.Actor{ID: owner}, filter)
+				}
+				return reader.Catalog(ctx, a.CatalogFilter{Filter: filter})
+			}
+			rows, count, err := read("Render")
+			if err != nil || count != 2 || len(rows) != 2 || len(clock.times) != 0 {
+				t.Fatalf("managed=%v rows=%v count=%d err=%v remaining times=%v", managed, rows, count, err, clock.times)
+			}
+			if rows[0]["waitlistCount"] != int32(2) || rows[1]["waitlistCount"] != int32(0) || rows[0]["description"] != nil || rows[0]["waitlistLimit"] != nil || rows[0]["id"].(string) >= rows[1]["id"].(string) {
+				t.Fatalf("render ordering/boundary/nullability changed: %v", rows)
+			}
+			clock.times = []time.Time{start}
+			rows, count, err = read("missing")
+			if err != nil || count != 0 || rows == nil || len(rows) != 0 {
+				t.Fatalf("empty list: %v %d %v", rows, count, err)
+			}
+		}
+		exec(`DELETE FROM events WHERE title LIKE 'Render %'`)
+	})
 	approvals := a.NewApprovalService(store)
 	actor := a.Actor{ID: owner, IsOrganizer: true}
 	schoolAdmin := a.Actor{ID: adminID, IsAdmin: true}

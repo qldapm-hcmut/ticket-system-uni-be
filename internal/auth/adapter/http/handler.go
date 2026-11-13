@@ -123,8 +123,12 @@ func (h *Handler) respondWithTokensAndProfile(c echo.Context, result application
 	if err != nil {
 		return respondError(c, err)
 	}
-	data := tokenDTO(result.Tokens)
-	data["user"] = profileDTO(profile)
+	data := map[string]any{
+		"accessToken":  result.Tokens.AccessToken,
+		"refreshToken": result.Tokens.RefreshToken,
+		"expiresIn":    result.Tokens.ExpiresIn,
+		"user":         profileDTO(profile),
+	}
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(200, map[string]any{"data": data})
 }
@@ -146,14 +150,6 @@ func (h *Handler) logout(c echo.Context) error {
 func (h *Handler) me(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(200, map[string]any{"data": profileDTO(c.Get("auth.profile").(application.Profile))})
-}
-
-func tokenDTO(t application.Tokens) map[string]any {
-	return map[string]any{
-		"accessToken":  t.AccessToken,
-		"refreshToken": t.RefreshToken,
-		"expiresIn":    t.ExpiresIn,
-	}
 }
 
 func profileDTO(p application.Profile) map[string]any {

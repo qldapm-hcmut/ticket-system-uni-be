@@ -26,7 +26,7 @@ func (r *repo) Register(ctx context.Context, event, student string) (a.Registrat
 	if errors.Is(err, pgx.ErrNoRows) {
 		return a.Registration{}, r.registrationUnavailable(ctx, eventID)
 	}
-	registration, err := mapReg(row.ID, row.EventID, row.StudentID, row.Status, row.QueueSeq, row.CheckinCode, row.CreatedAt, err)
+	registration, err := mapReg(db.Registration(row), err)
 	if err != nil {
 		return a.Registration{}, err
 	}
@@ -83,5 +83,5 @@ func (r *repo) Active(ctx context.Context, event, student string) (a.Registratio
 		return a.Registration{}, err
 	}
 	row, err := r.q.GetActiveRegistration(ctx, db.GetActiveRegistrationParams{EventID: eventID, StudentID: studentID})
-	return mapReg(row.ID, row.EventID, row.StudentID, row.Status, row.QueueSeq, row.CheckinCode, row.CreatedAt, err)
+	return mapReg(row, err)
 }

@@ -77,15 +77,7 @@ func (r *Reader) Managed(ctx context.Context, actor application.Actor, f applica
 	if err != nil {
 		return nil, 0, err
 	}
-	out := []map[string]any{}
-	for _, row := range rows {
-		item, err := r.render(ctx, row)
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, item)
-	}
-	return out, count, nil
+	return r.renderPage(ctx, rows, count)
 }
 
 func (r *Reader) Catalog(ctx context.Context, f application.CatalogFilter) ([]map[string]any, int64, error) {
@@ -104,6 +96,10 @@ func (r *Reader) Catalog(ctx context.Context, f application.CatalogFilter) ([]ma
 	if err != nil {
 		return nil, 0, err
 	}
+	return r.renderPage(ctx, rows, count)
+}
+
+func (r *Reader) renderPage(ctx context.Context, rows []db.Event, count int64) ([]map[string]any, int64, error) {
 	out := []map[string]any{}
 	for _, row := range rows {
 		item, err := r.render(ctx, row)

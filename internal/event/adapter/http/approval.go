@@ -23,13 +23,6 @@ func (h *ApprovalHandler) Register(e *echo.Echo, auth echo.MiddlewareFunc) {
 	g.POST("/events/:id/approve", h.approve)
 	g.POST("/events/:id/reject", h.reject)
 }
-func approvalVersion(c echo.Context) (int32, error) {
-	v, err := strconv.ParseInt(c.Request().Header.Get("If-Match"), 10, 32)
-	if err != nil || v < 1 {
-		return 0, domain.ErrValidation
-	}
-	return int32(v), nil
-}
 func (h *ApprovalHandler) submit(c echo.Context) error {
 	out, err := h.service.Submit(c.Request().Context(), actor(c), c.Param("id"), 0)
 	if err != nil {

@@ -169,10 +169,7 @@ func (r *repo) cancelRegistration(ctx context.Context, id, actor pgtype.UUID, re
 	}); err != nil {
 		return a.Registration{}, err
 	}
-	cancelled, err := mapReg(row.ID, row.EventID, row.StudentID, row.Status, row.QueueSeq, row.CheckinCode, row.CreatedAt, nil)
-	if err != nil {
-		return a.Registration{}, err
-	}
+	cancelled, _ := mapReg(row, nil)
 	if row.CancelledAt.Valid {
 		cancelled.CancelledAt = &row.CancelledAt.Time
 	}
@@ -199,10 +196,7 @@ func (r *repo) promoteWaitlistHead(ctx context.Context, eventID pgtype.UUID, dec
 		// A selected head must be promoted, not silently skipped.
 		return nil, fmt.Errorf("promote selected waitlist head %s for event %s: %w", head.ID.String(), eventID.String(), err)
 	}
-	promoted, err := mapReg(row.ID, row.EventID, row.StudentID, row.Status, row.QueueSeq, row.CheckinCode, row.CreatedAt, nil)
-	if err != nil {
-		return nil, err
-	}
+	promoted, _ := mapReg(row, nil)
 	if err = r.notify(ctx, promoted, db.NotificationTypePROMOTED); err != nil {
 		return nil, err
 	}

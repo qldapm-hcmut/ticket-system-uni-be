@@ -78,6 +78,23 @@ func (s *Service) Get(ctx context.Context, actor Actor, id string) (domain.Event
 	return result, err
 }
 
+// organizerEvent locks before checking scope so each mutation makes its state
+// and version decisions on the same authorized event, within its transaction.
+func organizerEvent(ctx context.Context, r EventRepository, actor, id string) (domain.Event, error) {
+	e, err := r.Get(ctx, id, true)
+	if err != nil {
+		return domain.Event{}, err
+	}
+	allowed, err := r.IsOrganizer(ctx, actor, e.UnitID)
+	if err != nil {
+		return domain.Event{}, err
+	}
+	if !allowed {
+		return domain.Event{}, domain.ErrNotFound
+	}
+	return e, nil
+}
+
 // Patch locks the current event, checks organizer scope, prepares a valid edit,
 // then persists it together with its notification and registration effects.
 func (s *Service) Patch(ctx context.Context, actor Actor, id string, version int32, merge func(domain.Fields) (domain.Fields, error)) (domain.Event, error) {
@@ -86,16 +103,9 @@ func (s *Service) Patch(ctx context.Context, actor Actor, id string, version int
 	}
 	var result domain.Event
 	err := s.uow.Do(ctx, func(ctx context.Context, r EventRepository) error {
-		current, err := r.Get(ctx, id, true)
+		current, err := organizerEvent(ctx, r, actor.ID, id)
 		if err != nil {
 			return err
-		}
-		allowed, err := r.IsOrganizer(ctx, actor.ID, current.UnitID)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			return domain.ErrNotFound
 		}
 		edited, err := s.prepareEventEdit(current, actor, version, merge)
 		if err != nil {

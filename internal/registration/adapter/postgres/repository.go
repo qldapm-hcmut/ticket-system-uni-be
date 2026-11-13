@@ -62,14 +62,18 @@ func (r *repo) notify(ctx context.Context, reg a.Registration, kind db.Notificat
 	}
 	return r.q.NotifyRegistration(ctx, db.NotifyRegistrationParams{RegistrationID: i, Kind: kind, Title: string(kind), Body: "Your event registration status has changed."})
 }
-func mapReg(id, eventID, studentID pgtype.UUID, status db.RegistrationStatus, queue pgtype.Int8, code string, created pgtype.Timestamptz, e error) (a.Registration, error) {
+func mapReg(row db.Registration, e error) (a.Registration, error) {
 	if errors.Is(e, pgx.ErrNoRows) {
 		return a.Registration{}, a.ErrNotFound
 	}
 	if e != nil {
 		return a.Registration{}, e
 	}
-	return a.Registration{ID: id.String(), EventID: eventID.String(), StudentID: studentID.String(), Status: string(status), QueueSeq: queue.Int64, CheckinCode: code, CreatedAt: created.Time}, nil
+	return a.Registration{
+		ID: row.ID.String(), EventID: row.EventID.String(), StudentID: row.StudentID.String(),
+		Status: string(row.Status), QueueSeq: row.QueueSeq.Int64,
+		CheckinCode: row.CheckinCode, CreatedAt: row.CreatedAt.Time,
+	}, nil
 }
 func (r *repo) Mine(ctx context.Context, student string, f a.MineFilter) ([]a.MyRegistration, int64, error) {
 	// Must be the first repository operation in a fresh Store.Do transaction:
@@ -98,7 +102,8 @@ func (r *repo) Mine(ctx context.Context, student string, f a.MineFilter) ([]a.My
 	out := make([]a.MyRegistration, 0, len(rows))
 	for _, row := range rows {
 		x := row.Registration
-		v, _ := mapReg(x.ID, x.EventID, x.StudentID, db.RegistrationStatus(row.EffectiveStatus), x.QueueSeq, x.CheckinCode, x.CreatedAt, nil)
+		x.Status = db.RegistrationStatus(row.EffectiveStatus)
+		v, _ := mapReg(x, nil)
 		if v.Status == "WAITLISTED" && row.WaitlistPosition >= 1 {
 			position := row.WaitlistPosition
 			v.WaitlistPosition = &position
