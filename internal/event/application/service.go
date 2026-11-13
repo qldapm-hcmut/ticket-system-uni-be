@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"time"
 
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
 	shared "github.com/qldapm-hcmut/ticket-system-uni/internal/shared/application"
@@ -31,6 +30,7 @@ type Service struct {
 }
 
 func New(uow UnitOfWork, clock kernel.Clock) *Service { return &Service{uow, clock} }
+
 func (s *Service) Create(ctx context.Context, actor Actor, unit string, f domain.Fields) (domain.Event, error) {
 	if !actor.IsOrganizer {
 		return domain.Event{}, domain.ErrForbidden
@@ -55,6 +55,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, unit string, f domain
 	}
 	return result, nil
 }
+
 func (s *Service) Get(ctx context.Context, actor Actor, id string) (domain.Event, error) {
 	var result domain.Event
 	err := s.uow.Do(ctx, func(ctx context.Context, r EventRepository) error {
@@ -77,51 +78,30 @@ func (s *Service) Get(ctx context.Context, actor Actor, id string) (domain.Event
 	return result, err
 }
 
-// Patch runs parsing/merging after fetching the current version under a row lock.
+// Patch locks the current event, checks organizer scope, prepares a valid edit,
+// then persists it together with its notification and registration effects.
 func (s *Service) Patch(ctx context.Context, actor Actor, id string, version int32, merge func(domain.Fields) (domain.Fields, error)) (domain.Event, error) {
 	if !actor.IsOrganizer {
 		return domain.Event{}, domain.ErrForbidden
 	}
 	var result domain.Event
 	err := s.uow.Do(ctx, func(ctx context.Context, r EventRepository) error {
-		e, err := r.Get(ctx, id, true)
+		current, err := r.Get(ctx, id, true)
 		if err != nil {
 			return err
 		}
-		allowed, err := r.IsOrganizer(ctx, actor.ID, e.UnitID)
+		allowed, err := r.IsOrganizer(ctx, actor.ID, current.UnitID)
 		if err != nil {
 			return err
 		}
 		if !allowed {
 			return domain.ErrNotFound
 		}
-		if e.Version != version {
-			return domain.ErrVersion
-		}
-		if e.Status != "DRAFT" && e.Status != "REJECTED" && e.Status != "PUBLISHED" {
-			return domain.ErrState
-		}
-		old := e.Fields
-		e.Fields, err = merge(e.Fields)
+		edited, err := s.prepareEventEdit(current, actor, version, merge)
 		if err != nil {
 			return err
 		}
-		e.SignificantChange = e.Status == "PUBLISHED" && (!old.StartAt.Equal(e.StartAt) || !old.EndAt.Equal(e.EndAt) || old.Location != e.Location)
-		if e.SignificantChange && !s.clock.Now().Before(old.StartAt.Add(-time.Hour)) {
-			return domain.ErrState
-		}
-		e.GrantCancellationException = e.SignificantChange && !s.clock.Now().Before(old.StartAt.Add(-24*time.Hour))
-		e.ChangedBy = actor.ID
-		if e.Capacity < e.RegisteredCount {
-			return domain.ErrCapacity
-		}
-		if e.WaitlistLimit != nil && *e.WaitlistLimit < e.WaitlistCount {
-			return domain.ErrValidation
-		}
-		if err = e.Fields.Validate(s.clock.Now()); err != nil {
-			return err
-		}
-		result, err = r.Update(ctx, e)
+		result, err = r.Update(ctx, edited)
 		return err
 	})
 	if err != nil {

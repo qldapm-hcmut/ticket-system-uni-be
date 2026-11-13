@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -62,7 +61,26 @@ func event(row db.Event, err error) (domain.Event, error) {
 	if row.WaitlistLimit.Valid {
 		limit = &row.WaitlistLimit.Int32
 	}
-	return domain.Event{ID: row.ID.String(), UnitID: row.UnitID.String(), CreatedBy: row.CreatedBy.String(), Status: string(row.Status), Version: row.Version, RegisteredCount: row.RegisteredCount, WaitlistCount: row.WaitlistCount, Fields: domain.Fields{Title: row.Title, Description: description, Location: row.Location, StartAt: row.StartAt.Time, EndAt: row.EndAt.Time, RegistrationOpensAt: row.RegistrationOpensAt.Time, RegistrationClosesAt: row.RegistrationClosesAt.Time, Capacity: row.Capacity, WaitlistLimit: limit}}, nil
+	return domain.Event{
+		ID:              row.ID.String(),
+		UnitID:          row.UnitID.String(),
+		CreatedBy:       row.CreatedBy.String(),
+		Status:          string(row.Status),
+		Version:         row.Version,
+		RegisteredCount: row.RegisteredCount,
+		WaitlistCount:   row.WaitlistCount,
+		Fields: domain.Fields{
+			Title:                row.Title,
+			Description:          description,
+			Location:             row.Location,
+			StartAt:              row.StartAt.Time,
+			EndAt:                row.EndAt.Time,
+			RegistrationOpensAt:  row.RegistrationOpensAt.Time,
+			RegistrationClosesAt: row.RegistrationClosesAt.Time,
+			Capacity:             row.Capacity,
+			WaitlistLimit:        limit,
+		},
+	}, nil
 }
 func (r *repository) IsOrganizer(ctx context.Context, user, unit string) (bool, error) {
 	u, err := id(user)
@@ -86,16 +104,31 @@ func (r *repository) Get(ctx context.Context, raw string, lock bool) (domain.Eve
 	return event(r.q.GetEvent(ctx, u))
 }
 func (r *repository) Create(ctx context.Context, unit, user string, f domain.Fields) (domain.Event, error) {
-	u, err := id(unit)
+	unitID, err := id(unit)
 	if err != nil {
 		return domain.Event{}, err
 	}
-	v, err := id(user)
+	creatorID, err := id(user)
 	if err != nil {
 		return domain.Event{}, err
 	}
-	return event(r.q.CreateDraftEvent(ctx, db.CreateDraftEventParams{UnitID: u, CreatedBy: v, Title: f.Title, Description: text(f.Description), Location: f.Location, StartAt: stamp(f.StartAt), EndAt: stamp(f.EndAt), RegistrationOpensAt: stamp(f.RegistrationOpensAt), RegistrationClosesAt: stamp(f.RegistrationClosesAt), Capacity: f.Capacity, WaitlistLimit: integer(f.WaitlistLimit)}))
+	return event(r.q.CreateDraftEvent(ctx, db.CreateDraftEventParams{
+		UnitID:               unitID,
+		CreatedBy:            creatorID,
+		Title:                f.Title,
+		Description:          text(f.Description),
+		Location:             f.Location,
+		StartAt:              stamp(f.StartAt),
+		EndAt:                stamp(f.EndAt),
+		RegistrationOpensAt:  stamp(f.RegistrationOpensAt),
+		RegistrationClosesAt: stamp(f.RegistrationClosesAt),
+		Capacity:             f.Capacity,
+		WaitlistLimit:        integer(f.WaitlistLimit),
+	}))
 }
+
+// Update persists the edit and its registration effects through the same
+// transaction-bound queries. Any error rolls back the entire edit.
 func (r *repository) Update(ctx context.Context, e domain.Event) (domain.Event, error) {
 	u, err := id(e.ID)
 	if err != nil {
@@ -106,32 +139,32 @@ func (r *repository) Update(ctx context.Context, e domain.Event) (domain.Event, 
 	if err != nil {
 		return event(db.Event{}, err)
 	}
-	updated, err := event(r.q.UpdateDraftEvent(ctx, db.UpdateDraftEventParams{ID: u, Title: f.Title, Description: text(f.Description), Location: f.Location, StartAt: stamp(f.StartAt), EndAt: stamp(f.EndAt), RegistrationOpensAt: stamp(f.RegistrationOpensAt), RegistrationClosesAt: stamp(f.RegistrationClosesAt), Capacity: f.Capacity, WaitlistLimit: integer(f.WaitlistLimit), Version: e.Version}))
+	updated, err := event(r.q.UpdateDraftEvent(ctx, db.UpdateDraftEventParams{
+		ID:                   u,
+		Title:                f.Title,
+		Description:          text(f.Description),
+		Location:             f.Location,
+		StartAt:              stamp(f.StartAt),
+		EndAt:                stamp(f.EndAt),
+		RegistrationOpensAt:  stamp(f.RegistrationOpensAt),
+		RegistrationClosesAt: stamp(f.RegistrationClosesAt),
+		Capacity:             f.Capacity,
+		WaitlistLimit:        integer(f.WaitlistLimit),
+		Version:              e.Version,
+	}))
 	if err != nil {
 		return domain.Event{}, err
 	}
+
 	if e.SignificantChange {
-		granted, err := r.q.UpdateCancellationExceptions(ctx, db.UpdateCancellationExceptionsParams{EventID: u, NewStart: stamp(f.StartAt), GrantException: e.GrantCancellationException})
+		updated.NotifiedCount, err = r.applySignificantEventChange(ctx, u, old, e)
 		if err != nil {
-			return domain.Event{}, err
-		}
-		updated.NotifiedCount, err = r.q.NotifyEventChanged(ctx, u)
-		if err != nil {
-			return domain.Event{}, err
-		}
-		actor, err := id(e.ChangedBy)
-		if err != nil {
-			return domain.Event{}, err
-		}
-		metadata, err := json.Marshal(map[string]any{"isSignificant": true, "exceptionGrantedCount": granted, "oldStartAt": old.StartAt.Time, "newStartAt": f.StartAt, "oldEndAt": old.EndAt.Time, "newEndAt": f.EndAt, "oldLocation": old.Location, "newLocation": f.Location})
-		if err != nil {
-			return domain.Event{}, err
-		}
-		if err = r.q.AuditEventChange(ctx, db.AuditEventChangeParams{ActorID: actor, EventID: u, Metadata: metadata}); err != nil {
 			return domain.Event{}, err
 		}
 		updated.SignificantChange = true
 	}
+
+	// The SQL promotes FIFO waitlist entries and writes their notifications.
 	if old.Status == db.EventStatusPUBLISHED && f.Capacity > old.Capacity {
 		updated.PromotedCount, err = r.q.PromoteWaitlistForCapacity(ctx, db.PromoteWaitlistForCapacityParams{EventID: u, Seats: f.Capacity - old.Capacity})
 		if err != nil {
