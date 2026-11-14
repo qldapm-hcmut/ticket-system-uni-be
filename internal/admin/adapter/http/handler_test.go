@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ type fakeStore struct {
 	err    error
 	filter a.Filter
 	list   *a.UserList
+	user   *auth.Profile
 }
 
 func (f *fakeStore) CreateUnit(context.Context, string, a.UnitCreate) (a.Unit, error) {
@@ -42,6 +44,9 @@ func (f *fakeStore) ListUsers(_ context.Context, _ string, filter a.Filter) (a.U
 func (f *fakeStore) UpdateUser(_ context.Context, _, _ string, v bool) (auth.Profile, error) {
 	f.calls++
 	f.active = v
+	if f.user != nil {
+		return *f.user, f.err
+	}
 	return auth.Profile{User: auth.User{ID: id, StudentCode: "123", IsAdmin: true, IsActive: v}}, f.err
 }
 func setup(f *fakeStore, p auth.Profile) *echo.Echo {
@@ -58,6 +63,55 @@ func request(e *echo.Echo, method, path, body string) *httptest.ResponseRecorder
 	e.ServeHTTP(w, r)
 	return w
 }
+
+// Lists and updates must retain the full profile shape even for inactive users.
+func TestAdminProfileResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile auth.Profile
+		want    map[string]any
+	}{
+		{"no roles", auth.Profile{User: auth.User{ID: id, Email: "test@hcmut.edu.vn", FullName: "Test User"}}, map[string]any{
+			"id": id, "email": "test@hcmut.edu.vn", "fullName": "Test User", "studentCode": nil,
+			"isAdmin": false, "isActive": false, "roles": []any{}, "units": []any{},
+		}},
+		{"overlapping roles", auth.Profile{User: auth.User{ID: id, Email: "test@hcmut.edu.vn", FullName: "Test User", StudentCode: "123", IsAdmin: true}, Memberships: []auth.Membership{
+			{UnitID: "second", Code: "CLUB", Name: "Club", MemberRole: "ORGANIZER"},
+			{UnitID: "first", Code: "CSE", Name: "Computer Science", MemberRole: "ORGANIZER"},
+		}}, map[string]any{
+			"id": id, "email": "test@hcmut.edu.vn", "fullName": "Test User", "studentCode": "123",
+			"isAdmin": true, "isActive": false, "roles": []any{"STUDENT", "ORGANIZER", "ADMIN"},
+			"units": []any{
+				map[string]any{"unit": map[string]any{"id": "second", "code": "CLUB", "name": "Club"}, "memberRole": "ORGANIZER"},
+				map[string]any{"unit": map[string]any{"id": "first", "code": "CSE", "name": "Computer Science"}, "memberRole": "ORGANIZER"},
+			},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{list: &a.UserList{Items: []auth.Profile{tc.profile}, TotalItems: 1}, user: &tc.profile}
+			e := setup(store, auth.Profile{User: auth.User{ID: id, IsAdmin: true, IsActive: true}})
+			for _, method := range []string{"GET", "PATCH"} {
+				path, body := "/api/v1/admin/users", ""
+				if method == "PATCH" {
+					path, body = path+"/"+id, `{"isActive":false}`
+				}
+				response := request(e, method, path, body)
+				var payload struct{ Data any }
+				if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+					t.Fatal(err)
+				}
+				var want any = tc.want
+				if method == "GET" {
+					want = []any{tc.want}
+				}
+				if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || !reflect.DeepEqual(payload.Data, want) {
+					t.Fatalf("%s profile response: %d %s", method, response.Code, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestAdminHTTPValidationAndResponses(t *testing.T) {
 	f := &fakeStore{}
 	e := setup(f, auth.Profile{User: auth.User{ID: id, IsAdmin: true, IsActive: true}})

@@ -36,6 +36,7 @@ type fakeProfiles struct {
 	disabled bool
 	err      error
 	readID   string
+	profile  *application.Profile
 }
 
 func (p *fakeProfiles) ReadProfile(_ context.Context, id string) (application.Profile, error) {
@@ -46,7 +47,35 @@ func (p *fakeProfiles) ReadProfile(_ context.Context, id string) (application.Pr
 	if p.disabled {
 		return application.Profile{}, application.ErrUnauthenticated
 	}
+	if p.profile != nil {
+		return *p.profile, nil
+	}
 	return application.Profile{User: application.User{ID: "user", Email: "test@hcmut.edu.vn", FullName: "Test User", IsActive: true, StudentCode: "2210001", IsAdmin: true}, Memberships: []application.Membership{{UnitID: "unit", Code: "CSE", Name: "Computer Science", MemberRole: "ORGANIZER"}}}, nil
+}
+
+// Empty profile collections must remain arrays, and absent studentCode is null.
+func TestMeWithoutRoles(t *testing.T) {
+	profile := application.Profile{User: application.User{ID: "user", Email: "test@hcmut.edu.vn", FullName: "Test User", IsActive: true}}
+	for _, memberships := range [][]application.Membership{nil, {}} {
+		profile.Memberships = memberships
+		e := echo.New()
+		New(&fakeService{}, fakeAccess{}, &fakeProfiles{profile: &profile}).Register(e)
+		req := httptest.NewRequest("GET", "/api/v1/me", nil)
+		req.Header.Set("Authorization", "Bearer valid")
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		var got any
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{"data": map[string]any{
+			"id": "user", "email": "test@hcmut.edu.vn", "fullName": "Test User", "studentCode": nil,
+			"isAdmin": false, "isActive": true, "roles": []any{}, "units": []any{},
+		}}
+		if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || !reflect.DeepEqual(got, want) {
+			t.Fatalf("profile response: %d %s", rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func TestHTTPRoutes(t *testing.T) {

@@ -54,8 +54,9 @@ func (s *Service) List(ctx context.Context, actor string, filter Filter) (List, 
 
 func (s *Service) MarkRead(ctx context.Context, actor string, options ReadOptions) (ReadResult, error) {
 	hasIDs := len(options.IDs) > 0
-	// Choose either mark-all or a nonempty list of IDs, never both.
-	if options.All == hasIDs || len(options.IDs) > 100 {
+	bothChoices := options.All && hasIDs
+	neitherChoice := !options.All && !hasIDs
+	if bothChoices || neitherChoice || len(options.IDs) > 100 {
 		return ReadResult{}, ErrValidation
 	}
 	for _, id := range options.IDs {
