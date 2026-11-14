@@ -140,13 +140,9 @@ func (h *Handler) patch(c echo.Context) error {
 		}
 	}
 	updated, err := h.service.Patch(c.Request().Context(), actor(c), c.Param("id"), int32(version), func(current domain.Fields) (domain.Fields, error) {
-		raw, _ := json.Marshal(current)
-		var merged map[string]json.RawMessage
-		_ = json.Unmarshal(raw, &merged)
-		for k, v := range fields {
-			merged[k] = v
-		}
-		raw, _ = json.Marshal(merged)
+		// Decode only the validated patch fields over the current values. Using
+		// the map also preserves the body's existing last-duplicate-key behavior.
+		raw, _ := json.Marshal(fields)
 		if err := json.Unmarshal(raw, &current); err != nil {
 			return current, domain.ErrValidation
 		}

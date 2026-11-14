@@ -10,7 +10,12 @@ import (
 
 type ProfileReader struct{ queries *db.Queries }
 
-func NewProfileReader(pool *pgxpool.Pool) *ProfileReader { return &ProfileReader{db.New(pool)} }
+func NewProfileReader(pool *pgxpool.Pool) *ProfileReader {
+	return &ProfileReader{queries: db.New(pool)}
+}
+
+// ReadProfile loads the current active user, then their memberships. These reads
+// are not an atomic snapshot and do not share the login/refresh transaction.
 func (r *ProfileReader) ReadProfile(ctx context.Context, id string) (application.Profile, error) {
 	uid, err := uuid(id)
 	if err != nil {
@@ -23,7 +28,7 @@ func (r *ProfileReader) ReadProfile(ctx context.Context, id string) (application
 	if !row.IsActive {
 		return application.Profile{}, application.ErrUnauthenticated
 	}
-	u, err := user(row, nil)
+	user, err := userFromRow(row, nil)
 	if err != nil {
 		return application.Profile{}, err
 	}
@@ -31,9 +36,14 @@ func (r *ProfileReader) ReadProfile(ctx context.Context, id string) (application
 	if err != nil {
 		return application.Profile{}, mapError(err)
 	}
-	profile := application.Profile{User: u, Memberships: []application.Membership{}}
-	for _, m := range memberships {
-		profile.Memberships = append(profile.Memberships, application.Membership{UnitID: m.UnitID.String(), Code: m.Code, Name: m.Name, MemberRole: string(m.MemberRole)})
+	profile := application.Profile{User: user, Memberships: []application.Membership{}}
+	for _, membership := range memberships {
+		profile.Memberships = append(profile.Memberships, application.Membership{
+			UnitID:     membership.UnitID.String(),
+			Code:       membership.Code,
+			Name:       membership.Name,
+			MemberRole: string(membership.MemberRole),
+		})
 	}
 	return profile, nil
 }

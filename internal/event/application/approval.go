@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
 )
 
@@ -20,82 +21,95 @@ type ApprovalUnitOfWork interface {
 type ApprovalService struct{ uow ApprovalUnitOfWork }
 
 func NewApprovalService(u ApprovalUnitOfWork) *ApprovalService { return &ApprovalService{u} }
+
+// Submit locks the event, checks organizer scope and state, then records the
+// submission and its audit entry in the same transaction.
 func (s *ApprovalService) Submit(ctx context.Context, a Actor, id string, version int32) (domain.Event, error) {
-	var out domain.Event
+	var result domain.Event
 	err := s.uow.DoApproval(ctx, func(r ApprovalRepository) error {
-		e, err := r.Get(ctx, id, true)
+		current, err := r.Get(ctx, id, true)
 		if err != nil {
 			return err
 		}
-		ok, err := r.IsOrganizer(ctx, a.ID, e.UnitID)
+		allowed, err := r.IsOrganizer(ctx, a.ID, current.UnitID)
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if !allowed {
 			return domain.ErrNotFound
 		}
-		if version != 0 && e.Version != version {
+		if version != 0 && current.Version != version {
 			return domain.ErrVersion
 		}
-		if e.Status != "DRAFT" && e.Status != "REJECTED" {
+		switch current.Status {
+		case "DRAFT", "REJECTED":
+			// Both a new draft and a revised rejection can be submitted.
+		default:
 			return domain.ErrState
 		}
-		out, err = r.Submit(ctx, id, e.Version)
+
+		result, err = r.Submit(ctx, id, current.Version)
 		if err != nil {
 			return err
 		}
 		return r.Audit(ctx, a.ID, id, "SUBMIT", "")
 	})
-	return out, err
+	return result, err
 }
+
+// Approve checks the administrator before locking, then checks self-approval,
+// version and pending state before publishing and auditing atomically.
 func (s *ApprovalService) Approve(ctx context.Context, a Actor, id string, version int32) (domain.Event, error) {
 	if !a.IsAdmin {
 		return domain.Event{}, domain.ErrForbidden
 	}
-	var out domain.Event
+	var result domain.Event
 	err := s.uow.DoApproval(ctx, func(r ApprovalRepository) error {
-		e, err := r.Get(ctx, id, true)
+		current, err := r.Get(ctx, id, true)
 		if err != nil {
 			return err
 		}
-		if e.CreatedBy == a.ID {
+		if current.CreatedBy == a.ID {
 			return domain.ErrForbidden
 		}
-		if version != 0 && e.Version != version {
+		if version != 0 && current.Version != version {
 			return domain.ErrVersion
 		}
-		if e.Status != "PENDING_APPROVAL" {
+		if current.Status != "PENDING_APPROVAL" {
 			return domain.ErrState
 		}
-		out, err = r.Approve(ctx, id, e.Version, a.ID)
+
+		result, err = r.Approve(ctx, id, current.Version, a.ID)
 		if err != nil {
 			return err
 		}
 		return r.Audit(ctx, a.ID, id, "APPROVE", "")
 	})
-	return out, err
+	return result, err
 }
+
 func (s *ApprovalService) Reject(ctx context.Context, a Actor, id string, version int32, reason string) (domain.Event, error) {
 	if !a.IsAdmin || len(reason) == 0 || len(reason) > 500 {
 		return domain.Event{}, domain.ErrValidation
 	}
-	var out domain.Event
+	var result domain.Event
 	err := s.uow.DoApproval(ctx, func(r ApprovalRepository) error {
-		e, err := r.Get(ctx, id, true)
+		current, err := r.Get(ctx, id, true)
 		if err != nil {
 			return err
 		}
-		if version != 0 && e.Version != version {
+		if version != 0 && current.Version != version {
 			return domain.ErrVersion
 		}
-		if e.Status != "PENDING_APPROVAL" {
+		if current.Status != "PENDING_APPROVAL" {
 			return domain.ErrState
 		}
-		out, err = r.Reject(ctx, id, e.Version, reason)
+
+		result, err = r.Reject(ctx, id, current.Version, reason)
 		if err != nil {
 			return err
 		}
 		return r.Audit(ctx, a.ID, id, "REJECT", reason)
 	})
-	return out, err
+	return result, err
 }

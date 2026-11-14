@@ -50,32 +50,59 @@ func New(store Store) *Service { return &Service{store} }
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func ValidID(id string) bool { return uuidPattern.MatchString(id) }
+
 func (s *Service) CreateUnit(ctx context.Context, actor string, in UnitCreate) (Unit, error) {
-	if !ValidID(actor) || strings.TrimSpace(in.Code) == "" || strings.TrimSpace(in.Name) == "" || utf8.RuneCountInString(in.Code) > 30 || utf8.RuneCountInString(in.Name) > 200 || (in.Type != "FACULTY" && in.Type != "CLUB" && in.Type != "DEPARTMENT") {
+	if !ValidID(actor) {
+		return Unit{}, ErrValidation
+	}
+	if strings.TrimSpace(in.Code) == "" || utf8.RuneCountInString(in.Code) > 30 {
+		return Unit{}, ErrValidation
+	}
+	if strings.TrimSpace(in.Name) == "" || utf8.RuneCountInString(in.Name) > 200 {
+		return Unit{}, ErrValidation
+	}
+	switch in.Type {
+	case "FACULTY", "CLUB", "DEPARTMENT":
+	default:
 		return Unit{}, ErrValidation
 	}
 	return s.store.CreateUnit(ctx, actor, in)
 }
+
 func (s *Service) SetMembers(ctx context.Context, actor, unit string, members []Member) ([]UnitMember, error) {
 	if !ValidID(actor) || !ValidID(unit) || members == nil {
 		return nil, ErrValidation
 	}
 	seen := make(map[string]bool, len(members))
-	for _, m := range members {
-		key := strings.ToLower(m.UserID)
-		if !ValidID(m.UserID) || m.MemberRole != "ORGANIZER" || seen[key] {
+	for _, member := range members {
+		userID := strings.ToLower(member.UserID)
+		if !ValidID(member.UserID) || member.MemberRole != "ORGANIZER" || seen[userID] {
 			return nil, ErrValidation
 		}
-		seen[key] = true
+		seen[userID] = true
 	}
 	return s.store.SetMembers(ctx, actor, unit, members)
 }
-func (s *Service) ListUsers(ctx context.Context, actor string, f Filter) (UserList, error) {
-	if !ValidID(actor) || f.Page < 1 || f.PageSize < 1 || f.PageSize > 100 || f.Page-1 > math.MaxInt64/f.PageSize || (f.Role != "" && f.Role != "STUDENT" && f.Role != "ORGANIZER" && f.Role != "ADMIN") {
+
+func (s *Service) ListUsers(ctx context.Context, actor string, filter Filter) (UserList, error) {
+	if !ValidID(actor) {
 		return UserList{}, ErrValidation
 	}
-	return s.store.ListUsers(ctx, actor, f)
+	if filter.Page < 1 || filter.PageSize < 1 || filter.PageSize > 100 {
+		return UserList{}, ErrValidation
+	}
+	// Check before the store computes (Page - 1) * PageSize.
+	if filter.Page-1 > math.MaxInt64/filter.PageSize {
+		return UserList{}, ErrValidation
+	}
+	switch filter.Role {
+	case "", "STUDENT", "ORGANIZER", "ADMIN":
+	default:
+		return UserList{}, ErrValidation
+	}
+	return s.store.ListUsers(ctx, actor, filter)
 }
+
 func (s *Service) UpdateUser(ctx context.Context, actor, user string, active bool) (auth.Profile, error) {
 	if !ValidID(actor) || !ValidID(user) {
 		return auth.Profile{}, ErrValidation

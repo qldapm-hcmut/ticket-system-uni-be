@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	a "github.com/qldapm-hcmut/ticket-system-uni/internal/admin/application"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/auth/adapter/httpdto"
 	auth "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/application"
 )
 
@@ -166,27 +167,37 @@ func (h *Handler) listUsers(c echo.Context) error {
 	if values, present := c.QueryParams()["role"]; present && (len(values) != 1 || (role != "STUDENT" && role != "ORGANIZER" && role != "ADMIN")) {
 		return respondError(c, a.ErrValidation)
 	}
-	p, err := page(c, "page", 1)
+	filter := a.Filter{Q: c.QueryParam("q"), Role: role}
+	var err error
+	filter.Page, err = page(c, "page", 1)
 	if err != nil {
 		return respondError(c, err)
 	}
-	size, err := page(c, "pageSize", 20)
+	filter.PageSize, err = page(c, "pageSize", 20)
 	if err != nil {
 		return respondError(c, err)
 	}
-	out, err := h.service.ListUsers(c.Request().Context(), actor(c), a.Filter{Q: c.QueryParam("q"), Role: role, Page: p, PageSize: size})
+	out, err := h.service.ListUsers(c.Request().Context(), actor(c), filter)
 	if err != nil {
 		return respondError(c, err)
 	}
 	data := make([]any, 0, len(out.Items))
-	for _, u := range out.Items {
-		data = append(data, userDTO(u))
+	for _, user := range out.Items {
+		data = append(data, httpdto.Profile(user))
 	}
-	pages := out.TotalItems / size
-	if out.TotalItems%size != 0 {
-		pages++
+	totalPages := out.TotalItems / filter.PageSize
+	if out.TotalItems%filter.PageSize != 0 {
+		totalPages++
 	}
-	return c.JSON(200, map[string]any{"data": data, "meta": map[string]int64{"page": p, "pageSize": size, "totalItems": out.TotalItems, "totalPages": pages}})
+	return c.JSON(200, map[string]any{
+		"data": data,
+		"meta": map[string]int64{
+			"page":       filter.Page,
+			"pageSize":   filter.PageSize,
+			"totalItems": out.TotalItems,
+			"totalPages": totalPages,
+		},
+	})
 }
 func (h *Handler) updateUser(c echo.Context) error {
 	var body struct {
@@ -199,24 +210,5 @@ func (h *Handler) updateUser(c echo.Context) error {
 	if err != nil {
 		return respondError(c, err)
 	}
-	return c.JSON(200, map[string]any{"data": userDTO(out)})
-}
-func userDTO(p auth.Profile) map[string]any {
-	roles := []string{}
-	var student any
-	if p.StudentCode != "" {
-		student = p.StudentCode
-		roles = append(roles, "STUDENT")
-	}
-	if len(p.Memberships) > 0 {
-		roles = append(roles, "ORGANIZER")
-	}
-	if p.IsAdmin {
-		roles = append(roles, "ADMIN")
-	}
-	units := []any{}
-	for _, m := range p.Memberships {
-		units = append(units, map[string]any{"unit": map[string]string{"id": m.UnitID, "code": m.Code, "name": m.Name}, "memberRole": m.MemberRole})
-	}
-	return map[string]any{"id": p.ID, "email": p.Email, "fullName": p.FullName, "studentCode": student, "isAdmin": p.IsAdmin, "isActive": p.IsActive, "roles": roles, "units": units}
+	return c.JSON(200, map[string]any{"data": httpdto.Profile(out)})
 }

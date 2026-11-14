@@ -29,7 +29,15 @@ type Fields struct {
 }
 
 func (f Fields) Validate(now time.Time) error {
-	if strings.TrimSpace(f.Title) == "" || utf8.RuneCountInString(f.Title) > 200 || strings.TrimSpace(f.Location) == "" || utf8.RuneCountInString(f.Location) > 255 || f.Capacity < 1 || f.Capacity > 5000 || (f.WaitlistLimit != nil && *f.WaitlistLimit < 0) || !f.StartAt.After(now) || !f.EndAt.After(f.StartAt) || !f.RegistrationOpensAt.Before(f.RegistrationClosesAt) || f.RegistrationClosesAt.After(f.StartAt) {
+	if strings.TrimSpace(f.Title) == "" || utf8.RuneCountInString(f.Title) > 200 ||
+		strings.TrimSpace(f.Location) == "" || utf8.RuneCountInString(f.Location) > 255 {
+		return ErrValidation
+	}
+	if f.Capacity < 1 || f.Capacity > 5000 || (f.WaitlistLimit != nil && *f.WaitlistLimit < 0) {
+		return ErrValidation
+	}
+	if !f.StartAt.After(now) || !f.EndAt.After(f.StartAt) ||
+		!f.RegistrationOpensAt.Before(f.RegistrationClosesAt) || f.RegistrationClosesAt.After(f.StartAt) {
 		return ErrValidation
 	}
 	return nil

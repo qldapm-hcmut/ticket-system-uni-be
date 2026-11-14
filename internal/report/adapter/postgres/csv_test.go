@@ -16,6 +16,9 @@ func TestSafeCell(t *testing.T) {
 		{"", ""}, {"Nguyễn An", "Nguyễn An"}, {"normal,quoted", "normal,quoted"},
 		{"=1+1", "'=1+1"}, {" +cmd", "' +cmd"}, {"-1", "'-1"}, {"@SUM(A1)", "'@SUM(A1)"},
 		{"\tplain", "'\tplain"}, {"\rplain", "'\rplain"}, {"\nplain", "'\nplain"}, {" \t=1", "' \t=1"},
+		{" \t\r\n@SUM(A1)", "' \t\r\n@SUM(A1)"}, {"   ", "   "},
+		{"\t", "'\t"}, {" \tplain", " \tplain"}, {" \rplain", " \rplain"}, {" \nplain", " \nplain"},
+		{"'already protected", "'already protected"}, {"＝1+1", "＝1+1"},
 	} {
 		if got := safeCell(tc.input); got != tc.want {
 			t.Errorf("safeCell(%q)=%q want %q", tc.input, got, tc.want)

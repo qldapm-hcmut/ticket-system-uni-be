@@ -12,16 +12,9 @@ func (s *Service) DeleteDraft(ctx context.Context, actor Actor, id string) error
 		return domain.ErrForbidden
 	}
 	return s.uow.Do(ctx, func(ctx context.Context, r EventRepository) error {
-		e, err := r.Get(ctx, id, true)
+		e, err := organizerEvent(ctx, r, actor.ID, id)
 		if err != nil {
 			return err
-		}
-		allowed, err := r.IsOrganizer(ctx, actor.ID, e.UnitID)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			return domain.ErrNotFound
 		}
 		if e.Status != "DRAFT" {
 			return domain.ErrState
