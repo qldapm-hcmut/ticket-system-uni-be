@@ -13,7 +13,7 @@ import (
 
 const countManagedEvents = `-- name: CountManagedEvents :one
 SELECT count(*) FROM events e
-WHERE ($1::boolean OR EXISTS(SELECT 1 FROM unit_memberships m WHERE m.unit_id=e.unit_id AND m.user_id=$2))
+WHERE ($1::boolean OR EXISTS(SELECT 1 FROM unit_memberships m JOIN units u ON u.id=m.unit_id AND u.is_active WHERE m.unit_id=e.unit_id AND m.user_id=$2))
 AND ($3::text='' OR e.unit_id::text=$3)
 AND ($4::text='' OR e.status::text=ANY(string_to_array($4,',')))
 AND ($5::text='' OR strpos(lower(e.title),lower($5::text))>0)
@@ -108,9 +108,36 @@ func (q *Queries) GetEventUnit(ctx context.Context, id pgtype.UUID) (GetEventUni
 	return i, err
 }
 
+const getMyEventRegistration = `-- name: GetMyEventRegistration :one
+WITH active AS (
+ SELECT r.id,r.student_id,r.status,
+ CASE WHEN r.status='WAITLISTED' THEN row_number() OVER (PARTITION BY r.status ORDER BY r.queue_seq,r.id) END AS position
+ FROM registrations r JOIN events e ON e.id=r.event_id
+ WHERE r.event_id=$2 AND (r.status='REGISTERED'
+ OR (r.status='WAITLISTED' AND e.start_at>$3::timestamptz))
+)
+SELECT coalesce((SELECT jsonb_build_object('id',id,'status',status,'waitlistPosition',position)
+ FROM active WHERE student_id=$1), 'null'::jsonb)::jsonb AS registration
+`
+
+type GetMyEventRegistrationParams struct {
+	StudentID pgtype.UUID
+	EventID   pgtype.UUID
+	NowAt     pgtype.Timestamptz
+}
+
+// Rank the full live waitlist before selecting this caller; cancelled history
+// and effectively expired WAITLISTED rows are not active registrations.
+func (q *Queries) GetMyEventRegistration(ctx context.Context, arg GetMyEventRegistrationParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, getMyEventRegistration, arg.StudentID, arg.EventID, arg.NowAt)
+	var registration []byte
+	err := row.Scan(&registration)
+	return registration, err
+}
+
 const listManagedEvents = `-- name: ListManagedEvents :many
 SELECT e.id, e.unit_id, e.created_by, e.title, e.description, e.location, e.start_at, e.end_at, e.registration_opens_at, e.registration_closes_at, e.capacity, e.waitlist_limit, e.registered_count, e.waitlist_count, e.status, e.approved_by, e.approved_at, e.reject_reason, e.published_at, e.cancelled_at, e.cancel_reason, e.version, e.created_at, e.updated_at FROM events e
-WHERE ($1::boolean OR EXISTS(SELECT 1 FROM unit_memberships m WHERE m.unit_id=e.unit_id AND m.user_id=$2))
+WHERE ($1::boolean OR EXISTS(SELECT 1 FROM unit_memberships m JOIN units u ON u.id=m.unit_id AND u.is_active WHERE m.unit_id=e.unit_id AND m.user_id=$2))
 AND ($3::text='' OR e.unit_id::text=$3)
 AND ($4::text='' OR e.status::text=ANY(string_to_array($4,',')))
 AND ($5::text='' OR strpos(lower(e.title),lower($5::text))>0)

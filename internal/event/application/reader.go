@@ -16,8 +16,9 @@ type CatalogFilter struct {
 }
 
 type Reader interface {
-	Catalog(context.Context, CatalogFilter) ([]map[string]any, int64, error)
+	Catalog(context.Context, Actor, CatalogFilter) ([]map[string]any, int64, error)
 	Units(context.Context, string) ([]map[string]any, error)
-	Detail(context.Context, string) (map[string]any, error)
+	Detail(context.Context, Actor, string) (map[string]any, error)
 	Managed(context.Context, Actor, Filter) ([]map[string]any, int64, error)
+	Pending(context.Context, Actor, Filter) ([]map[string]any, int64, error)
 }

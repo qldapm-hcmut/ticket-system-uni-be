@@ -44,7 +44,7 @@ func (c patchClock) Now() time.Time { return c.now }
 
 type patchReader struct{ a.Reader }
 
-func (patchReader) Detail(context.Context, string) (map[string]any, error) {
+func (patchReader) Detail(context.Context, a.Actor, string) (map[string]any, error) {
 	return map[string]any{"id": "event"}, nil
 }
 

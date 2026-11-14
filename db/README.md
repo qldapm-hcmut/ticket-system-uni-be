@@ -28,22 +28,79 @@ Initial migration đã được kiểm chứng up/down/up bằng integration tes
 ```sh
 go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0
 make sqlc
-# Cần psql; dùng email Admin thật, không commit vào repository:
-make seed ADMIN_EMAIL='admin@hcmut.edu.vn'
+# Khuyến nghị bootstrap Admin bằng CLI nội bộ ở mục dưới.
+# Legacy seed cần psql và đủ 3 biến, không dùng make seed cũ:
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -v admin_email='<verified-school-email>' -v operator='<internal-id>' \
+  -v ticket='<verification-reference>' -f db/seed/seed.sql
 # DB kết nối chỉ dùng để tạo database test riêng; role cần CREATEDB:
 TEST_DATABASE_URL='postgres://ticket:ticket_local@localhost:5432/ticket?sslmode=disable' make test-int
 ```
 
 Integration test tạo database tên ngẫu nhiên, chạy up/down/up và kiểm tra constraint, sau đó xóa database test; không chạy down lên database trong URL. Thiếu `TEST_DATABASE_URL` thì test báo lỗi, không âm thầm skip. Đã chạy thành công integration test trên PostgreSQL 16 qua Podman. Seed cũng đã chạy hai lần trên database tạm, xác nhận không tạo trùng user và audit bootstrap.
 
-Seed không nhận Google sub, không seed MSSV demo vào DB thật. Nếu email đã tồn tại mà chưa là Admin, seed không nâng quyền; dùng quy trình nâng quyền có audit riêng. Query liên kết Google chỉ là primitive: adapter auth phải xác minh OIDC, email, active và thực hiện transaction đúng contract trước khi gọi.
+Seed không nhận Google sub, không seed MSSV demo vào DB thật. Chỉ user thật sự được INSERT mới nhận audit `GRANT_ADMIN`; user đã là Admin là no-op. Email đã tồn tại nhưng chưa là Admin làm seed thất bại và rollback, không âm thầm nâng quyền hoặc khôi phục quyền đã thu hồi. Seed giữ bootstrap đơn vị CSE; CLI bootstrap chỉ tạo tài khoản. Query liên kết Google chỉ là primitive: adapter auth phải xác minh OIDC, email, active và thực hiện transaction đúng contract trước khi gọi.
 
-## Import MSSV cần triển khai
+## CLI nội bộ: import MSSV và Admin
 
-- Bootstrap đơn vị và email Admin thật `@hcmut.edu.vn`, không seed mật khẩu.
-- Import danh sách sinh viên gồm email trường, họ tên, MSSV; kiểm tra trùng email/MSSV, ghi audit và hỗ trợ bổ sung MSSV cho user đã đăng nhập.
-- User bootstrap chưa có `google_sub` chỉ được liên kết sau khi xác minh đầy đủ Google ID token.
-- User chưa có MSSV không có vai trò STUDENT; không tự cấp quyền khi đăng nhập Google.
-- Admin được cấp/thu hồi bởi quy trình nội bộ có audit, không qua API công khai.
+`cmd/ops` dành cho người vận hành nội bộ đã được đội dev xác minh, **không phải API Admin**. Giới hạn quyền chạy binary và quyền truy cập DB ở hạ tầng. `--operator` là ID truy vết, không phải cơ chế xác thực; ticket phải dẫn tới quy trình xác minh thực tế. Không dùng email/MSSV làm operator/ticket. Không commit roster, dữ liệu thật hoặc thông tin kết nối.
 
-Import MSSV và email dispatcher chưa được triển khai. Test schema nằm trong `db/schema_integration_test.go`; test persistence/use case và concurrency hiện có nằm trong `internal/*/adapter/postgres/*_integration_test.go`. Sự hiện diện của test không thay thế việc chạy lại và đối chiếu độ bao phủ với contract.
+Build/chạy trực tiếp bằng Go; CLI chỉ đọc `DATABASE_URL` từ môi trường tiến trình, không tự nạp `.env` và không cần Google/JWT/QR secrets:
+
+```sh
+go build -o /tmp/ticket-ops ./cmd/ops
+# DATABASE_URL phải được cấp sẵn qua môi trường an toàn.
+/tmp/ticket-ops students import --file /secure/roster.csv \
+  --operator '<internal-id>' --ticket '<verification-reference>' --dry-run
+/tmp/ticket-ops students import --file /secure/roster.csv \
+  --operator '<internal-id>' --ticket '<verification-reference>'
+/tmp/ticket-ops admin bootstrap --email '<verified-school-email>' \
+  --full-name '<verified-name>' --operator '<internal-id>' --ticket '<reference>'
+/tmp/ticket-ops admin grant --user-id '<existing-user-uuid>' \
+  --operator '<internal-id>' --ticket '<reference>'
+/tmp/ticket-ops admin revoke --user-id '<existing-user-uuid>' \
+  --operator '<internal-id>' --ticket '<reference>'
+```
+
+### Roster CSV
+
+UTF-8 (chấp nhận BOM), header đúng thứ tự `email,fullName,studentCode`. Ví dụ chỉ dùng dữ liệu giả:
+
+```csv
+email,fullName,studentCode
+example.student@hcmut.edu.vn,Example Student,0012345
+```
+
+- Email là địa chỉ thuần, domain chính xác `hcmut.edu.vn`, so sánh không phân biệt hoa thường.
+- Họ tên không rỗng, tối đa 120 ký tự; MSSV không rỗng, tối đa 10 ký tự. MSSV là chuỗi, giữ số 0 đầu; không tự giả định chỉ gồm số.
+- File rỗng/sai CSV, trùng email hoặc MSSV bị từ chối trước khi kết nối DB. Không in giá trị dữ liệu; lỗi validation chỉ nêu loại lỗi và dòng/bản ghi.
+- Email mới tạo user active, không Admin, chưa có Google sub. Email hiện hữu chưa có MSSV được bổ sung trên đúng UUID đó, kể cả đã đăng nhập Google trước.
+- Cùng email/cùng MSSV là unchanged. Email đã mang MSSV khác, hoặc MSSV thuộc UUID khác là conflict: rollback **toàn bộ file**, không merge/chuyển MSSV.
+- Giữ nguyên tên hiện hữu, UUID, email, Google sub, quyền Admin, active, memberships, sessions và dữ liệu nghiệp vụ. Tên roster chỉ dùng khi tạo user mới. Không xóa user vắng trong file.
+- Import và audit `UPDATE_USER` commit cùng transaction; audit không chứa tên/email/MSSV, dùng before/after trạng thái Student, ticket/operator và batchId. Audit lỗi thì không ghi nhận thay đổi nào.
+- `--dry-run` chạy cùng kiểm tra và mutation DB nhưng rollback cả user/audit. Các số đếm là dự kiến, không giữ chỗ trước lần chạy thật. PostgreSQL sequence có thể vẫn tăng dù rollback.
+- Thành công in created/enriched/unchanged và committed hoặc dry-run. Rerun cùng dữ liệu không tạo audit mutation giả. Không tự retry khi commit có kết quả không chắc chắn: kiểm tra trạng thái trước rồi mới chạy lại.
+
+User bootstrap chỉ liên kết Google sau khi xác minh đầy đủ ID token. User chưa có MSSV chưa có vai trò STUDENT; import không suy diễn MSSV từ email hoặc Google.
+
+### Bootstrap/grant/revoke Admin
+
+Bootstrap chỉ tạo user mới với `google_sub = NULL`, không mật khẩu. Email đã là Admin là unchanged; email hiện hữu chưa là Admin phải dùng lệnh grant theo UUID sau xác minh. Bootstrap không tự khôi phục quyền đã revoke.
+
+Grant/revoke khóa user và chỉ đổi `is_admin`/`updated_at`, audit `GRANT_ADMIN`/`REVOKE_ADMIN` cùng transaction. Audit có ticket, operator, source và before/after; `actor_id = NULL` vì operator CLI là danh tính hạ tầng, không được giả làm user đích. Trạng thái đã đúng là unchanged, không tạo audit chuyển quyền giả. Không tự mở khóa inactive, không đổi MSSV/Google sub và không gán Organizer. Quyền được phản ánh ở request xác thực tiếp theo; Admin đơn thuần vẫn không được check-in.
+
+Không có rule cấm thu hồi Admin cuối cùng: quy trình nội bộ vẫn có thể grant lại sau xác minh. Không cấp quyền chạy CLI chỉ vì một user có JWT Admin.
+
+### Test operations
+
+Unit/CLI tests không cần DB: `go test -race ./cmd/ops ./internal/ops/...`.
+
+Integration tests có build tag `integration`, tạo database tên riêng rồi xóa, yêu cầu PostgreSQL 16 và role CREATEDB. Cấp `TEST_DATABASE_URL` cho DB test riêng, không dùng DB thật:
+
+```sh
+go test -race -tags=integration ./internal/ops/adapter/postgres
+```
+
+Seed tests cần `psql`; nếu chỉ có client trong container Podman test, đặt `TEST_PSQL_CONTAINER` bằng tên/ID container test đó. Container phải chứa đúng PostgreSQL instance của `TEST_DATABASE_URL` và cho phép `psql -U postgres` local. Không dùng biến này với container production.
+
+Tests bao phủ bảo toàn identity/quyền, import sau login, conflict/rollback/dry-run, audit failure, concurrent import/login-style insert, Admin transitions và seed rerun. Test schema ở `db/schema_integration_test.go`; sự hiện diện của test không thay thế chạy kiểm chứng.

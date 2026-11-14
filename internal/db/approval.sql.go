@@ -12,18 +12,35 @@ import (
 )
 
 const approveEvent = `-- name: ApproveEvent :one
-UPDATE events SET status='PUBLISHED', approved_by=$2, approved_at=now(), published_at=now(), version=version+1, updated_at=now()
-WHERE id=$1 AND version=$3 AND status='PENDING_APPROVAL' AND created_by<>$2 RETURNING id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
+UPDATE events
+SET status = 'PUBLISHED',
+    approved_by = $1,
+    approved_at = $2,
+    published_at = $2,
+    version = version + 1,
+    updated_at = $2
+WHERE id = $3
+  AND version = $4
+  AND status = 'PENDING_APPROVAL'
+  AND created_by <> $1
+  AND start_at > $2::timestamptz
+RETURNING id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
 `
 
 type ApproveEventParams struct {
-	ID         pgtype.UUID
 	ApprovedBy pgtype.UUID
+	NowAt      pgtype.Timestamptz
+	ID         pgtype.UUID
 	Version    int32
 }
 
 func (q *Queries) ApproveEvent(ctx context.Context, arg ApproveEventParams) (Event, error) {
-	row := q.db.QueryRow(ctx, approveEvent, arg.ID, arg.ApprovedBy, arg.Version)
+	row := q.db.QueryRow(ctx, approveEvent,
+		arg.ApprovedBy,
+		arg.NowAt,
+		arg.ID,
+		arg.Version,
+	)
 	var i Event
 	err := row.Scan(
 		&i.ID,
@@ -55,7 +72,9 @@ func (q *Queries) ApproveEvent(ctx context.Context, arg ApproveEventParams) (Eve
 }
 
 const countPendingEvents = `-- name: CountPendingEvents :one
-SELECT count(*) FROM events WHERE status='PENDING_APPROVAL'
+SELECT count(*)
+FROM events
+WHERE status = 'PENDING_APPROVAL'
 `
 
 func (q *Queries) CountPendingEvents(ctx context.Context) (int64, error) {
@@ -66,7 +85,11 @@ func (q *Queries) CountPendingEvents(ctx context.Context) (int64, error) {
 }
 
 const listPendingEvents = `-- name: ListPendingEvents :many
-SELECT id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at FROM events WHERE status='PENDING_APPROVAL' ORDER BY updated_at,id LIMIT $1 OFFSET $2
+SELECT id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
+FROM events
+WHERE status = 'PENDING_APPROVAL'
+ORDER BY updated_at, id
+LIMIT $1 OFFSET $2
 `
 
 type ListPendingEventsParams struct {
@@ -119,9 +142,45 @@ func (q *Queries) ListPendingEvents(ctx context.Context, arg ListPendingEventsPa
 	return items, nil
 }
 
+const notifyApprovalDecision = `-- name: NotifyApprovalDecision :exec
+INSERT INTO notifications (user_id, event_id, type, title, body)
+SELECT e.created_by,
+       e.id,
+       $1::notification_type,
+       CASE WHEN $1::notification_type = 'EVENT_APPROVED'
+            THEN 'Sự kiện đã được duyệt'
+            ELSE 'Sự kiện bị từ chối'
+       END,
+       $2::text
+FROM events e
+WHERE e.id = $3
+`
+
+type NotifyApprovalDecisionParams struct {
+	NotificationType NotificationType
+	Body             string
+	EventID          pgtype.UUID
+}
+
+// Creator is the sole Organizer recipient. This producer runs in the same
+// transaction as the decision and audit; delivery is handled after commit.
+func (q *Queries) NotifyApprovalDecision(ctx context.Context, arg NotifyApprovalDecisionParams) error {
+	_, err := q.db.Exec(ctx, notifyApprovalDecision, arg.NotificationType, arg.Body, arg.EventID)
+	return err
+}
+
 const rejectEvent = `-- name: RejectEvent :one
-UPDATE events SET status='REJECTED', reject_reason=$2, approved_by=NULL, approved_at=NULL, version=version+1, updated_at=now()
-WHERE id=$1 AND version=$3 AND status='PENDING_APPROVAL' RETURNING id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
+UPDATE events
+SET status = 'REJECTED',
+    reject_reason = $2,
+    approved_by = NULL,
+    approved_at = NULL,
+    version = version + 1,
+    updated_at = now()
+WHERE id = $1
+  AND version = $3
+  AND status = 'PENDING_APPROVAL'
+RETURNING id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
 `
 
 type RejectEventParams struct {
@@ -163,8 +222,15 @@ func (q *Queries) RejectEvent(ctx context.Context, arg RejectEventParams) (Event
 }
 
 const submitEvent = `-- name: SubmitEvent :one
-UPDATE events SET status='PENDING_APPROVAL', reject_reason=NULL, version=version+1, updated_at=now()
-WHERE id=$1 AND version=$2 AND status IN ('DRAFT','REJECTED') RETURNING id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
+UPDATE events
+SET status = 'PENDING_APPROVAL',
+    reject_reason = NULL,
+    version = version + 1,
+    updated_at = now()
+WHERE id = $1
+  AND version = $2
+  AND status IN ('DRAFT', 'REJECTED')
+RETURNING id, unit_id, created_by, title, description, location, start_at, end_at, registration_opens_at, registration_closes_at, capacity, waitlist_limit, registered_count, waitlist_count, status, approved_by, approved_at, reject_reason, published_at, cancelled_at, cancel_reason, version, created_at, updated_at
 `
 
 type SubmitEventParams struct {

@@ -15,10 +15,10 @@ import (
 
 func main() {
 	fx.New(
-		fx.Provide(config.Load, postgres.NewPool,
+		fx.Provide(config.Load, config.LoadEmail, postgres.NewPool,
 			func(pool *pgxpool.Pool) worker.Jobs { return eventpg.New(pool) },
 		),
-		fx.Invoke(worker.RegisterLifecycle),
+		fx.Invoke(worker.RegisterLifecycle, registerEmail),
 		fx.StartTimeout(15*time.Second),
 		fx.StopTimeout(10*time.Second),
 	).Run()

@@ -445,7 +445,7 @@ Các mutation không dùng event_id cho audit đơn vị/user; response dữ li�
 
 ### 5.2 Events
 
-**Event object** (dùng chung E1–E7):
+**Event object** (dùng chung các response có body của E1–E7 và P1–P4):
 
 ```json
 {
@@ -472,11 +472,13 @@ Các mutation không dùng event_id cho audit đơn vị/user; response dữ li�
 }
 ```
 
-`myRegistration` chỉ trả khi người gọi có vai trò STUDENT (null nếu chưa đăng ký); `createdBy` và `version` chỉ trả cho Organizer của đơn vị hoặc Admin. Organizer kiêm sinh viên nhận cả hai nhóm field.
+`myRegistration` chỉ trả khi người gọi có vai trò STUDENT, null nếu không có đăng ký còn hiệu lực (chưa đăng ký, chỉ có lịch sử đã hủy, hoặc WAITLISTED khi `now >= startAt`). REGISTERED vẫn được trả sau giờ bắt đầu; `waitlistPosition` là null với REGISTERED, còn WAITLISTED được tính theo FIFO trên toàn bộ waitlist còn hiệu lực trước khi chọn đăng ký của người gọi.
+
+`createdBy`, `version`, `rejectReason` và `approvedBy` chỉ trả cho Organizer được gán vào đơn vị active của sự kiện hoặc Admin; `approvedBy` là null nếu chưa duyệt, `rejectReason` là null nếu không có lý do từ chối. `cancelReason` trả cho mọi người gọi được xem sự kiện, null nếu không có lý do hủy. Người gọi kiêm sinh viên và Organizer/Admin nhận cả hai nhóm field; các quy tắc projection này áp dụng cả danh sách, chi tiết và response mutation.
 
 **E1 `GET /events`** — query: `q`, `unitId`, `from`, `to`, `availableOnly=true`, `page`, `pageSize`. Chỉ trả `status = PUBLISHED`, sắp theo `startAt` tăng dần.
 
-**E3 `GET /manage/events`** — query thêm `status` (nhiều giá trị, phân cách dấu phẩy). Organizer thấy sự kiện thuộc các đơn vị mình là ORGANIZER; Admin thấy mọi sự kiện toàn trường.
+**E3 `GET /manage/events`** — query thêm `status` (nhiều giá trị, phân cách dấu phẩy). Organizer thấy sự kiện thuộc các đơn vị active mình được gán là ORGANIZER; Admin thấy mọi sự kiện toàn trường, kể cả thuộc đơn vị inactive.
 
 **E4 `POST /events`**
 
@@ -518,11 +520,17 @@ Validation: người gọi phải là ORGANIZER của `unitId`; `endAt > startAt
 
 ### 5.3 Duyệt sự kiện
 
-**P1 `POST /events/{eventId}/submit`** — không body. DRAFT/REJECTED → PENDING\_APPROVAL, ghi log `SUBMIT`.
+P1, P3 và P4 thành công trả `200 { "data": ...Event object }` đầy đủ theo projection của người gọi ở §5.2, không trả trực tiếp entity nội bộ. Chuyển trạng thái không hợp lệ trả `409 INVALID_STATE_TRANSITION`.
 
-**P3 `POST /events/{eventId}/approve`** — `{ "comment": "OK" }` (tùy chọn). Kiểm tra: user có `is_admin = true`, và `userId <> createdBy`. Không phải Admin → `403 FORBIDDEN`; người duyệt trùng người tạo → `403 SELF_APPROVAL_NOT_ALLOWED`. Nếu `startAt` đã qua → `422 VALIDATION_ERROR`. Thành công: status = PUBLISHED, set `approvedBy`, `approvedAt`, `publishedAt`, notify Organizer `EVENT_APPROVED`.
+**P1 `POST /events/{eventId}/submit`** — không body. Organizer của đơn vị active gửi DRAFT/REJECTED → PENDING\_APPROVAL, ghi log `SUBMIT` cùng transaction.
 
-**P4 `POST /events/{eventId}/reject`** — `{ "reason": "Thiếu thông tin địa điểm" }` (bắt buộc). PENDING\_APPROVAL → REJECTED, lưu lý do vào events.reject\_reason và activity\_logs, notify Organizer `EVENT_REJECTED`.
+**P2 `GET /approvals/pending`** — chỉ Admin, không yêu cầu membership đơn vị. Trả danh sách Event có phân trang, sắp theo lần gửi duyệt gần nhất của từng sự kiện, cũ nhất trước (`updated_at ASC, id ASC` khi đang PENDING\_APPROVAL), không sắp theo `startAt`.
+
+**P3 `POST /events/{eventId}/approve`** — body và `comment` đều tùy chọn; có thể không gửi body hoặc gửi `{}`. Nếu gửi `comment`, phải là string không null, tối đa 500 ký tự Unicode (không đếm byte); body/comment sai trả `400 VALIDATION_ERROR`. Kiểm tra: user có `is_admin = true`, và `userId <> createdBy`. Không phải Admin → `403 FORBIDDEN`; người duyệt trùng người tạo → `403 SELF_APPROVAL_NOT_ALLOWED`. Chỉ duyệt PENDING\_APPROVAL khi `now < startAt`; tại hoặc sau giờ bắt đầu (`now >= startAt`) → `422 VALIDATION_ERROR`. Thành công: status = PUBLISHED, set `approvedBy`, `approvedAt`, `publishedAt`, ghi audit `APPROVE` kèm comment nếu có, notify `EVENT_APPROVED`.
+
+**P4 `POST /events/{eventId}/reject`** — `{ "reason": "Thiếu thông tin địa điểm" }` (bắt buộc). Reason không được chỉ whitespace, tối đa 500 ký tự Unicode (không đếm byte); sai trả `400 VALIDATION_ERROR`. Chỉ Admin, không phải người tạo sự kiện: không phải Admin → `403 FORBIDDEN`; từ chối sự kiện do chính mình tạo → `403 SELF_APPROVAL_NOT_ALLOWED`, theo §6.1. PENDING\_APPROVAL → REJECTED, lưu lý do vào events.reject\_reason và audit `REJECT` trong activity\_logs, notify `EVENT_REJECTED`.
+
+P3/P4 khóa event và commit thay đổi trạng thái, audit, notification trong cùng transaction; lỗi bất kỳ rollback toàn bộ. Người nhận duy nhất của `EVENT_APPROVED`/`EVENT_REJECTED` là Organizer tạo sự kiện (`events.created_by`), không broadcast cho mọi thành viên đơn vị. Notification phục vụ in-app và outbox email (`PENDING`); gửi email chỉ diễn ra sau commit. P5 hiển thị approval comment hoặc rejection reason qua field `comment` của bản ghi lịch sử.
 
 ### 5.4 Đăng ký & waitlist
 

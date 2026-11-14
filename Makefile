@@ -13,6 +13,7 @@ worker:
 build:
 	go build -o bin/api ./cmd/api
 	go build -o bin/worker ./cmd/worker
+	go build -o bin/ops ./cmd/ops
 test:
 	go test -race ./...
 test-int:
@@ -35,4 +36,6 @@ sqlc:
 seed:
 	@test -n "$(DATABASE_URL)" || (echo 'DATABASE_URL is required'; exit 1)
 	@test -n "$(ADMIN_EMAIL)" || (echo 'ADMIN_EMAIL is required (bootstrap school email)'; exit 1)
-	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -v admin_email="$(ADMIN_EMAIL)" -f db/seed/seed.sql
+	@test -n "$(OPERATOR)" || (echo 'OPERATOR is required (verified internal operator)'; exit 1)
+	@test -n "$(TICKET)" || (echo 'TICKET is required (verification reference)'; exit 1)
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -v admin_email="$(ADMIN_EMAIL)" -v operator="$(OPERATOR)" -v ticket="$(TICKET)" -f db/seed/seed.sql
