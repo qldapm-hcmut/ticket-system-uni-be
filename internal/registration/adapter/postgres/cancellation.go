@@ -74,15 +74,7 @@ func (r *repo) prepareCancellation(ctx context.Context, id, actor pgtype.UUID, r
 	}
 	// Non-locking owner/scope preflight. Do not queue unauthorized callers on
 	// the event row. Event/registration ownership is immutable in this API.
-	var unit pgtype.UUID
-	if original.StudentID != actor && roles.IsOrganizer {
-		event, err := r.q.GetEvent(ctx, original.EventID)
-		if err != nil {
-			return cancellationDecision{}, err
-		}
-		unit = event.UnitID
-	}
-	by, err := r.cancellationActor(ctx, original, actor, unit, roles)
+	by, err := r.cancellationActor(ctx, original, actor, nil, roles)
 	if err != nil {
 		return cancellationDecision{}, err
 	}
@@ -102,7 +94,7 @@ func (r *repo) prepareCancellation(ctx context.Context, id, actor pgtype.UUID, r
 	if err != nil {
 		return cancellationDecision{}, err
 	}
-	by, err = r.cancellationActor(ctx, original, actor, event.UnitID, roles)
+	by, err = r.cancellationActor(ctx, original, actor, &event, roles)
 	if err != nil {
 		return cancellationDecision{}, err
 	}
@@ -129,7 +121,9 @@ func (r *repo) cancellationRoles(ctx context.Context, actor pgtype.UUID) (db.Get
 	return roles, err
 }
 
-func (r *repo) cancellationActor(ctx context.Context, original db.Registration, actor, unit pgtype.UUID, roles db.GetUserRolesRow) (db.CancelActor, error) {
+// A nil event is the non-locking preflight; after locking, pass the event
+// already read. Only on-behalf cancellation needs an event scope lookup.
+func (r *repo) cancellationActor(ctx context.Context, original db.Registration, actor pgtype.UUID, event *db.Event, roles db.GetUserRolesRow) (db.CancelActor, error) {
 	if original.StudentID == actor {
 		// Ownership always wins over staff privileges, including Admin.
 		if !roles.IsStudent {
@@ -140,7 +134,14 @@ func (r *repo) cancellationActor(ctx context.Context, original db.Registration, 
 	if !roles.IsOrganizer {
 		return "", a.ErrNotFound
 	}
-	allowed, err := r.q.IsUnitOrganizer(ctx, db.IsUnitOrganizerParams{UserID: actor, UnitID: unit})
+	if event == nil {
+		row, err := r.q.GetEvent(ctx, original.EventID)
+		if err != nil {
+			return "", err
+		}
+		event = &row
+	}
+	allowed, err := r.q.IsUnitOrganizer(ctx, db.IsUnitOrganizerParams{UserID: actor, UnitID: event.UnitID})
 	if err != nil {
 		return "", err
 	}
