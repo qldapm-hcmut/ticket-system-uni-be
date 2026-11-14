@@ -58,6 +58,9 @@ type Querier interface {
 	GetEventForUpdate(ctx context.Context, id pgtype.UUID) (Event, error)
 	GetEventUnit(ctx context.Context, id pgtype.UUID) (GetEventUnitRow, error)
 	GetManagementScope(ctx context.Context, arg GetManagementScopeParams) (pgtype.UUID, error)
+	// Rank the full live waitlist before selecting this caller; cancelled history
+	// and effectively expired WAITLISTED rows are not active registrations.
+	GetMyEventRegistration(ctx context.Context, arg GetMyEventRegistrationParams) ([]byte, error)
 	GetOwnedRegistrationView(ctx context.Context, arg GetOwnedRegistrationViewParams) (GetOwnedRegistrationViewRow, error)
 	GetRegistration(ctx context.Context, id pgtype.UUID) (Registration, error)
 	GetRegistrationByCheckinCode(ctx context.Context, arg GetRegistrationByCheckinCodeParams) (Registration, error)
@@ -81,6 +84,8 @@ type Querier interface {
 	ListManagedEvents(ctx context.Context, arg ListManagedEventsParams) ([]Event, error)
 	ListMyNotifications(ctx context.Context, arg ListMyNotificationsParams) ([]ListMyNotificationsRow, error)
 	ListMyRegistrations(ctx context.Context, arg ListMyRegistrationsParams) ([]ListMyRegistrationsRow, error)
+	// One active email consumer. No row locks or transaction are held during SMTP.
+	ListPendingEmails(ctx context.Context, limit int32) ([]ListPendingEmailsRow, error)
 	ListPendingEvents(ctx context.Context, arg ListPendingEventsParams) ([]Event, error)
 	ListPublishedEvents(ctx context.Context, arg ListPublishedEventsParams) ([]Event, error)
 	ListReportRegistrations(ctx context.Context, arg ListReportRegistrationsParams) ([]ListReportRegistrationsRow, error)
@@ -88,10 +93,23 @@ type Querier interface {
 	LockCompletedEvents(ctx context.Context, batchSize int32) ([]pgtype.UUID, error)
 	LockExpiredWaitlistEvents(ctx context.Context, batchSize int32) ([]pgtype.UUID, error)
 	MarkMyNotificationsRead(ctx context.Context, arg MarkMyNotificationsReadParams) (int64, error)
+	// Creator is the sole Organizer recipient. This producer runs in the same
+	// transaction as the decision and audit; delivery is handled after commit.
+	NotifyApprovalDecision(ctx context.Context, arg NotifyApprovalDecisionParams) error
 	NotifyEventChanged(ctx context.Context, eventID pgtype.UUID) (int64, error)
 	NotifyRegistration(ctx context.Context, arg NotifyRegistrationParams) error
+	OpsInsertActivity(ctx context.Context, arg OpsInsertActivityParams) error
+	// Internal dev-operated identity enrichment and privilege operations only.
+	// Every mutation and its audit must use the same transaction.
+	OpsInsertUser(ctx context.Context, arg OpsInsertUserParams) (User, error)
+	OpsLockUserByEmail(ctx context.Context, email string) (User, error)
+	OpsLockUserByID(ctx context.Context, id pgtype.UUID) (User, error)
+	OpsSetAdmin(ctx context.Context, arg OpsSetAdminParams) error
+	OpsSetStudentCode(ctx context.Context, arg OpsSetStudentCodeParams) error
 	PromoteRegistration(ctx context.Context, arg PromoteRegistrationParams) (Registration, error)
 	PromoteWaitlistForCapacity(ctx context.Context, arg PromoteWaitlistForCapacityParams) (int32, error)
+	// email_attempts counts failed sends, not successful sends.
+	RecordEmailDelivery(ctx context.Context, arg RecordEmailDeliveryParams) (int64, error)
 	RegisterStudent(ctx context.Context, arg RegisterStudentParams) (RegisterStudentRow, error)
 	RejectEvent(ctx context.Context, arg RejectEventParams) (Event, error)
 	RevokeAuthSession(ctx context.Context, arg RevokeAuthSessionParams) error

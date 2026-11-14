@@ -19,6 +19,7 @@ import (
 	eventhttp "github.com/qldapm-hcmut/ticket-system-uni/internal/event/adapter/http"
 	a "github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/shared/kernel"
 )
 
 type renderSequenceClock struct{ times []time.Time }
@@ -108,7 +109,7 @@ func TestManagementLists(t *testing.T) {
 				if managed {
 					return reader.Managed(ctx, a.Actor{ID: owner}, filter)
 				}
-				return reader.Catalog(ctx, a.CatalogFilter{Filter: filter})
+				return reader.Catalog(ctx, a.Actor{ID: owner}, a.CatalogFilter{Filter: filter})
 			}
 			rows, count, err := read("Render")
 			if err != nil || count != 2 || len(rows) != 2 || len(clock.times) != 0 {
@@ -125,7 +126,7 @@ func TestManagementLists(t *testing.T) {
 		}
 		exec(`DELETE FROM events WHERE title LIKE 'Render %'`)
 	})
-	approvals := a.NewApprovalService(store)
+	approvals := a.NewApprovalService(store, kernel.SystemClock{})
 	actor := a.Actor{ID: owner, IsOrganizer: true}
 	schoolAdmin := a.Actor{ID: adminID, IsAdmin: true}
 	if _, err := approvals.Submit(ctx, actor, event, 1); err != nil {
@@ -137,7 +138,7 @@ func TestManagementLists(t *testing.T) {
 	if _, err := approvals.Submit(ctx, actor, event, 3); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := approvals.Approve(ctx, schoolAdmin, event, 4); err != nil {
+	if _, err := approvals.Approve(ctx, schoolAdmin, event, 4, ""); err != nil {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {

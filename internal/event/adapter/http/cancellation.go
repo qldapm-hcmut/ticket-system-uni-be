@@ -31,7 +31,7 @@ func (h *Handler) cancel(c echo.Context) error {
 		return failure(c, err)
 	}
 	// Read inside the handler only after the transaction has committed.
-	detail, err := h.reader.Detail(c.Request().Context(), result.Event.ID)
+	detail, err := h.reader.Detail(c.Request().Context(), actor(c), result.Event.ID)
 	if err != nil {
 		return failure(c, err)
 	}

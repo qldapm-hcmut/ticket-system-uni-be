@@ -12,6 +12,7 @@ type Actor struct {
 	ID          string
 	IsAdmin     bool
 	IsOrganizer bool
+	IsStudent   bool
 }
 type EventRepository interface {
 	IsOrganizer(context.Context, string, string) (bool, error)

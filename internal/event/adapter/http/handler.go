@@ -35,11 +35,15 @@ func (h *Handler) Register(e *echo.Echo, authenticate echo.MiddlewareFunc) {
 }
 func actor(c echo.Context) application.Actor {
 	p := c.Get("auth.profile").(auth.Profile)
-	return application.Actor{ID: p.ID, IsAdmin: p.IsAdmin, IsOrganizer: len(p.Memberships) > 0}
+	return application.Actor{ID: p.ID, IsAdmin: p.IsAdmin, IsOrganizer: len(p.Memberships) > 0, IsStudent: p.StudentCode != ""}
 }
 func failure(c echo.Context, err error) error {
 	status, code := 500, "INTERNAL_ERROR"
 	switch {
+	case errors.Is(err, domain.ErrSelfApproval):
+		status, code = 403, "SELF_APPROVAL_NOT_ALLOWED"
+	case errors.Is(err, domain.ErrApprovalStart):
+		status, code = 422, "VALIDATION_ERROR"
 	case errors.Is(err, domain.ErrValidation):
 		status, code = 400, "VALIDATION_ERROR"
 	case errors.Is(err, domain.ErrNotFound):
@@ -92,7 +96,7 @@ func (h *Handler) create(c echo.Context) error {
 	if err != nil {
 		return failure(c, err)
 	}
-	result, err := h.reader.Detail(c.Request().Context(), e.ID)
+	result, err := h.reader.Detail(c.Request().Context(), actor(c), e.ID)
 	if err != nil {
 		return failure(c, err)
 	}
@@ -100,7 +104,7 @@ func (h *Handler) create(c echo.Context) error {
 }
 func (h *Handler) detail(c echo.Context) error {
 	a := actor(c)
-	result, err := h.reader.Detail(c.Request().Context(), c.Param("id"))
+	result, err := h.reader.Detail(c.Request().Context(), a, c.Param("id"))
 	if err != nil {
 		return failure(c, err)
 	}
@@ -114,7 +118,7 @@ func (h *Handler) detail(c echo.Context) error {
 	if err != nil {
 		return failure(c, err)
 	}
-	result, err = h.reader.Detail(c.Request().Context(), c.Param("id"))
+	result, err = h.reader.Detail(c.Request().Context(), a, c.Param("id"))
 	if err != nil {
 		return failure(c, err)
 	}
@@ -151,7 +155,7 @@ func (h *Handler) patch(c echo.Context) error {
 	if err != nil {
 		return failure(c, err)
 	}
-	result, err := h.reader.Detail(c.Request().Context(), c.Param("id"))
+	result, err := h.reader.Detail(c.Request().Context(), actor(c), c.Param("id"))
 	if err != nil {
 		return failure(c, err)
 	}

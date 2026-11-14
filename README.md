@@ -73,6 +73,7 @@ Với Google, cấu hình OAuth consent screen/audience và OAuth client cho fro
 cp .env.example .env
 # Điền GOOGLE_CLIENT_ID, JWT_SECRET, QR_HMAC_SECRET và cấu hình DB local trước khi chạy API.
 make db-up
+podman compose up -d mailpit
 make migrate-up
 make run
 ```
@@ -82,6 +83,26 @@ Chạy worker trong terminal khác:
 ```sh
 make worker
 ```
+
+### Email demo local với Mailpit
+
+Compose có PostgreSQL và Mailpit; API/worker chạy trên máy host. `.env.example` đã đặt `EMAIL_ENABLED=true`, `SMTP_HOST=127.0.0.1`, `SMTP_PORT=1025`, `SMTP_TLS_MODE=local`, sender `events@example.test` và không dùng SMTP credentials. Mở **http://127.0.0.1:8025** để xem email sau các thao tác tạo notification; worker xử lý khi khởi động rồi mỗi 30 giây. Mailpit chỉ giữ thư demo, không chuyển thư tới hộp thư thật; không dùng dữ liệu sinh viên thật. Thư không được lưu bền qua lần tạo lại container Mailpit.
+
+Các lệnh khi đã có `.env` và đã migrate:
+
+```sh
+podman compose up -d postgres mailpit
+make run       # terminal API; cần cấu hình Google/JWT/QR như trên
+make worker    # terminal khác; chỉ cần DB và cấu hình email
+# Sau demo:
+podman compose down
+```
+
+SMTP và UI chỉ publish trên loopback. Nếu đổi `MAILPIT_SMTP_PORT`, đổi `SMTP_PORT` tương ứng; `MAILPIT_UI_PORT` đổi cổng UI. Chỉ chạy **một worker email**. Nếu không cần email, đặt `EMAIL_ENABLED=false`; các notification vẫn ở PENDING, không được đánh dấu SENT giả. Khi bật lại worker, thư pending cũ cũng được gửi tới relay đang cấu hình.
+
+`SMTP_TLS_MODE=local` chỉ chấp nhận IP loopback (`127.0.0.1` hoặc `::1`), không chấp nhận hostname kể cả `localhost`/`mailpit`, và cấm SMTP credentials. Compose hiện không chứa worker container: không dùng `SMTP_HOST=mailpit` cho chế độ local; trong container, `127.0.0.1` trỏ vào chính container đó. Hãy chạy worker trên host theo hướng dẫn này. Với relay thật, dùng `SMTP_TLS_MODE=starttls` hoặc `tls`, cấu hình host/port/sender được relay cho phép và credentials khi cần; TLS luôn xác minh chứng chỉ/hostname. Việc Mailpit nhận thư không chứng minh gửi thành công tới provider bên ngoài.
+
+Nếu dùng Docker Compose thay Podman, thay các lệnh `podman compose` bằng `docker compose`; dùng `make COMPOSE='docker compose' db-up`/`db-down` cho các target Compose.
 
 Make tự nạp `.env` và mặc định `GOTOOLCHAIN=auto`. Khi chạy Go trực tiếp, cần tự export cấu hình môi trường. Không commit `.env`, secret hoặc dữ liệu sinh viên thật. Mật khẩu database mẫu chỉ dành cho local; PostgreSQL trong Compose chỉ bind loopback.
 
@@ -113,7 +134,7 @@ make lint       # kiểm tra định dạng và static analysis
 make test       # unit tests với race detector, không cần database
 make test-int   # integration tests với PostgreSQL thật
 make build      # build API và worker
-make db-down    # dừng PostgreSQL local, giữ volume dữ liệu
+make db-down    # dừng các service Compose local, giữ volume PostgreSQL
 ```
 
 `make test-int` yêu cầu `TEST_DATABASE_URL` và role có quyền tạo database test. Test database cô lập và seed bootstrap được hướng dẫn tại [`db/README.md`](db/README.md). Chỉ chạy migration down trên database có thể xóa hoặc sau khi đã có kế hoạch bảo vệ dữ liệu.

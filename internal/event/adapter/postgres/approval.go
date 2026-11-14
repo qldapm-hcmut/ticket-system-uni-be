@@ -3,6 +3,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"time"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/db"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
@@ -24,7 +27,12 @@ func (r *repository) Audit(ctx context.Context, actor, eventID, action, reason s
 	}
 	metadata := map[string]any{}
 	if reason != "" {
+		// P5 historically reads reason as its public comment. Preserve that
+		// representation while recording the explicit optional approval comment.
 		metadata["reason"] = reason
+		if action == "APPROVE" {
+			metadata["comment"] = reason
+		}
 	}
 	raw, err := json.Marshal(metadata)
 	if err != nil {
@@ -40,7 +48,7 @@ func (r *repository) Submit(ctx context.Context, raw string, v int32) (domain.Ev
 	}
 	return event(r.q.SubmitEvent(ctx, db.SubmitEventParams{ID: u, Version: v}))
 }
-func (r *repository) Approve(ctx context.Context, raw string, v int32, admin string) (domain.Event, error) {
+func (r *repository) Approve(ctx context.Context, raw string, v int32, admin string, now time.Time) (domain.Event, error) {
 	u, err := id(raw)
 	if err != nil {
 		return domain.Event{}, err
@@ -49,7 +57,11 @@ func (r *repository) Approve(ctx context.Context, raw string, v int32, admin str
 	if err != nil {
 		return domain.Event{}, err
 	}
-	return event(r.q.ApproveEvent(ctx, db.ApproveEventParams{ID: u, ApprovedBy: a, Version: v}))
+	row, err := r.q.ApproveEvent(ctx, db.ApproveEventParams{ID: u, ApprovedBy: a, Version: v, NowAt: stamp(now)})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Event{}, domain.ErrApprovalStart
+	}
+	return event(row, err)
 }
 func (r *repository) Reject(ctx context.Context, raw string, v int32, reason string) (domain.Event, error) {
 	u, err := id(raw)
@@ -58,22 +70,14 @@ func (r *repository) Reject(ctx context.Context, raw string, v int32, reason str
 	}
 	return event(r.q.RejectEvent(ctx, db.RejectEventParams{ID: u, RejectReason: text(&reason), Version: v}))
 }
-func (r *repository) Pending(ctx context.Context, page, size int32) ([]domain.Event, int64, error) {
-	rows, err := r.q.ListPendingEvents(ctx, db.ListPendingEventsParams{Limit: size, Offset: (page - 1) * size})
+func (r *repository) NotifyDecision(ctx context.Context, raw string, approved bool, body string) error {
+	eid, err := id(raw)
 	if err != nil {
-		return nil, 0, err
+		return err
 	}
-	count, err := r.q.CountPendingEvents(ctx)
-	if err != nil {
-		return nil, 0, err
+	kind := db.NotificationTypeEVENTREJECTED
+	if approved {
+		kind = db.NotificationTypeEVENTAPPROVED
 	}
-	out := make([]domain.Event, 0, len(rows))
-	for _, row := range rows {
-		e, err := event(row, nil)
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, e)
-	}
-	return out, count, nil
+	return r.q.NotifyApprovalDecision(ctx, db.NotifyApprovalDecisionParams{EventID: eid, NotificationType: kind, Body: body})
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	auth "github.com/qldapm-hcmut/ticket-system-uni/internal/auth/application"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
 )
 
@@ -15,7 +16,7 @@ type catalogReader struct {
 	filter application.CatalogFilter
 }
 
-func (r *catalogReader) Catalog(_ context.Context, f application.CatalogFilter) ([]map[string]any, int64, error) {
+func (r *catalogReader) Catalog(_ context.Context, _ application.Actor, f application.CatalogFilter) ([]map[string]any, int64, error) {
 	r.filter = f
 	return []map[string]any{{"title": "Test"}}, 21, nil
 }
@@ -23,7 +24,9 @@ func (r *catalogReader) Catalog(_ context.Context, f application.CatalogFilter) 
 func TestCatalog(t *testing.T) {
 	e := echo.New()
 	reader := &catalogReader{}
-	New(nil, reader).Register(e, func(next echo.HandlerFunc) echo.HandlerFunc { return next })
+	New(nil, reader).Register(e, func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error { c.Set("auth.profile", auth.Profile{}); return next(c) }
+	})
 	for _, query := range []string{"page=0", "pageSize=101", "page=2147483647&pageSize=100", "unitId=bad", "from=yesterday", "from=2026-11-03T00:00:00Z&to=2026-11-01T00:00:00Z", "availableOnly=yes"} {
 		t.Run(query, func(t *testing.T) {
 			rec := httptest.NewRecorder()

@@ -55,7 +55,7 @@ func (h *Handler) catalog(c echo.Context) error {
 	if err != nil {
 		return failure(c, err)
 	}
-	rows, count, err := h.reader.Catalog(c.Request().Context(), f)
+	rows, count, err := h.reader.Catalog(c.Request().Context(), actor(c), f)
 	if err != nil {
 		return failure(c, err)
 	}

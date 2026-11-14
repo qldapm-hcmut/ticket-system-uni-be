@@ -520,6 +520,7 @@ paths:
       tags: [Events]
       operationId: listManagedEvents
       summary: E3 — Organizer xem theo đơn vị; Admin xem toàn trường
+      description: Organizer chỉ thấy sự kiện thuộc đơn vị active được gán; Admin thấy toàn trường, kể cả đơn vị inactive. Event được projection theo vai trò người gọi.
       parameters:
         - name: status
           in: query
@@ -605,6 +606,7 @@ paths:
       tags: [Approval]
       operationId: submitEvent
       summary: P1 — Gửi duyệt (DRAFT/REJECTED → PENDING_APPROVAL)
+      description: Organizer thuộc đơn vị active gửi duyệt; trạng thái và audit SUBMIT commit cùng transaction. Trả Event đầy đủ theo projection của người gọi.
       parameters:
         - $ref: '#/components/parameters/EventId'
       responses:
@@ -626,7 +628,7 @@ paths:
     get:
       tags: [Approval]
       operationId: listPendingApprovals
-      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị. Sắp theo lần gửi duyệt gần nhất của từng sự kiện, cũ nhất trước (updated_at ASC, id ASC khi PENDING_APPROVAL), không theo startAt.
       summary: P2 — Hàng chờ duyệt toàn trường (Admin cấp trường)
       parameters:
         - $ref: '#/components/parameters/Page'
@@ -644,6 +646,7 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/Event' }
                   meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
@@ -651,7 +654,12 @@ paths:
     post:
       tags: [Approval]
       operationId: approveEvent
-      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+      description: |
+        Chỉ Admin, không phải người tạo; không yêu cầu membership đơn vị.
+        Chỉ duyệt PENDING_APPROVAL khi now < startAt; now >= startAt trả 422 VALIDATION_ERROR.
+        Body và comment tùy chọn; có thể không gửi body hoặc gửi {}. Nếu gửi comment, phải là string không null, tối đa 500 ký tự Unicode (không đếm byte); sai trả 400 VALIDATION_ERROR.
+        Trả Event đầy đủ theo projection của người gọi. Trạng thái, audit APPROVE (kèm comment nếu có) và notification EVENT_APPROVED commit cùng transaction; lỗi bất kỳ rollback toàn bộ.
+        Người nhận duy nhất là Organizer tạo sự kiện (events.created_by). Notification phục vụ in-app và outbox email PENDING; email chỉ gửi sau commit.
       summary: P3 — Duyệt và công bố (Admin, không phải người tạo)
       parameters:
         - $ref: '#/components/parameters/EventId'
@@ -662,7 +670,10 @@ paths:
             schema:
               type: object
               properties:
-                comment: { type: string, maxLength: 500 }
+                comment:
+                  type: string
+                  maxLength: 500
+                  description: Comment tùy chọn, không null; tối đa 500 ký tự Unicode, được ghi audit và hiển thị ở approval-logs.
       responses:
         '200':
           description: status = PUBLISHED
@@ -673,6 +684,7 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/Event' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403':
           description: FORBIDDEN hoặc SELF_APPROVAL_NOT_ALLOWED
@@ -681,13 +693,23 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+        '422':
+          description: VALIDATION_ERROR — now >= startAt, không thể duyệt sự kiện đã bắt đầu.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /events/{eventId}/reject:
     post:
       tags: [Approval]
       operationId: rejectEvent
-      description: Admin là quản trị viên cấp trường; không yêu cầu membership đơn vị.
+      description: |
+        Chỉ Admin, không phải người tạo; không yêu cầu membership đơn vị.
+        Không phải Admin trả 403 FORBIDDEN; từ chối sự kiện do chính mình tạo trả 403 SELF_APPROVAL_NOT_ALLOWED.
+        Reason bắt buộc, không được chỉ whitespace, tối đa 500 ký tự Unicode (không đếm byte); sai trả 400 VALIDATION_ERROR.
+        PENDING_APPROVAL → REJECTED; trả Event đầy đủ theo projection của người gọi.
+        Trạng thái, rejectReason, audit REJECT kèm reason và notification EVENT_REJECTED commit cùng transaction; lỗi bất kỳ rollback toàn bộ.
+        Người nhận duy nhất là Organizer tạo sự kiện (events.created_by). Notification phục vụ in-app và outbox email PENDING; email chỉ gửi sau commit.
       summary: P4 — Từ chối, bắt buộc lý do (Admin)
       parameters:
         - $ref: '#/components/parameters/EventId'
@@ -699,7 +721,11 @@ paths:
               type: object
               required: [reason]
               properties:
-                reason: { type: string, minLength: 1, maxLength: 500 }
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+                  description: Không được chỉ whitespace; tối đa 500 ký tự Unicode, lưu vào rejectReason và audit.
       responses:
         '200':
           description: status = REJECTED
@@ -712,7 +738,11 @@ paths:
                   data: { $ref: '#/components/schemas/Event' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '403':
+          description: FORBIDDEN hoặc SELF_APPROVAL_NOT_ALLOWED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
@@ -1479,6 +1509,7 @@ components:
         waitlistPosition: { type: [integer, 'null'], minimum: 1 }
     Event:
       type: object
+      description: Dùng cho danh sách, chi tiết và response mutation E1–E7 có body, P1–P4. Student kiêm Organizer/Admin nhận cả myRegistration và các field quản lý trong phạm vi; không loại trừ các vai trò chồng lấn.
       required:
         - id
         - unit
@@ -1521,23 +1552,25 @@ components:
           format: date-time
           description: startAt - 24h; sau mốc này chỉ đăng ký được cấp ngoại lệ Q19 mới có thể tự hủy, tới trước startAt
         status: { $ref: '#/components/schemas/EventStatus' }
-        cancelReason: { type: [string, 'null'] }
+        cancelReason:
+          type: [string, 'null']
+          description: Lý do hủy cho mọi người gọi được xem sự kiện; null nếu chưa có.
         rejectReason:
           type: [string, 'null']
-          description: Lý do từ chối gần nhất; chỉ trả cho Organizer/Admin
+          description: Lý do từ chối gần nhất, null nếu không có; chỉ trả cho Organizer thuộc đơn vị active của sự kiện hoặc Admin.
         version:
           type: integer
-          description: Chỉ trả cho Organizer/Admin; gửi lại qua header If-Match khi PATCH
+          description: Chỉ trả cho Organizer thuộc đơn vị active của sự kiện hoặc Admin; gửi lại qua header If-Match khi PATCH.
         createdBy:
-          description: Chỉ trả cho Organizer/Admin
+          description: Chỉ trả cho Organizer thuộc đơn vị active của sự kiện hoặc Admin.
           $ref: '#/components/schemas/UserSummary'
         approvedBy:
-          description: Chỉ trả cho Organizer/Admin
+          description: Chỉ trả cho Organizer thuộc đơn vị active của sự kiện hoặc Admin; null nếu chưa duyệt.
           oneOf:
             - $ref: '#/components/schemas/UserSummary'
             - type: 'null'
         myRegistration:
-          description: Chỉ trả cho sinh viên; null nếu chưa có đăng ký còn hiệu lực
+          description: Chỉ trả cho Student, kể cả kiêm Organizer/Admin; null nếu chưa đăng ký, chỉ có lịch sử đã hủy hoặc WAITLISTED khi now >= startAt. REGISTERED vẫn được trả sau giờ bắt đầu. WAITLISTED có vị trí FIFO trên toàn bộ waitlist còn hiệu lực; REGISTERED có waitlistPosition null.
           oneOf:
             - $ref: '#/components/schemas/MyRegistrationRef'
             - type: 'null'
@@ -1559,7 +1592,9 @@ components:
         id: { type: integer, format: int64 }
         action: { $ref: '#/components/schemas/ApprovalAction' }
         actor: { $ref: '#/components/schemas/UserSummary' }
-        comment: { type: [string, 'null'] }
+        comment:
+          type: [string, 'null']
+          description: Comment của APPROVE hoặc reason của REJECT; null nếu không có nội dung.
         createdAt: { type: string, format: date-time }
 
     # ---------- registrations ----------
