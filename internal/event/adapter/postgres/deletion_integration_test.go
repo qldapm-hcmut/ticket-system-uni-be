@@ -20,6 +20,7 @@ import (
 	eventhttp "github.com/qldapm-hcmut/ticket-system-uni/internal/event/adapter/http"
 	a "github.com/qldapm-hcmut/ticket-system-uni/internal/event/application"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/shared/kernel"
 )
 
 // Hold a completed mutation before commit, while its event lock is still held.
@@ -260,7 +261,7 @@ func TestDraftDeletion(t *testing.T) {
 			firstResult, secondResult := make(chan error, 1), make(chan error, 1)
 			go func() {
 				if first == "submit" {
-					_, err := a.NewApprovalService(gate).Submit(ctx, actor, id, 0)
+					_, err := a.NewApprovalService(gate, kernel.SystemClock{}).Submit(ctx, actor, id, 0)
 					firstResult <- err
 				} else {
 					firstResult <- a.New(gate, nil).DeleteDraft(ctx, actor, id)
@@ -275,7 +276,7 @@ func TestDraftDeletion(t *testing.T) {
 			}
 			go func() {
 				if first == "delete" {
-					_, err := a.NewApprovalService(store).Submit(ctx, actor, id, 0)
+					_, err := a.NewApprovalService(store, kernel.SystemClock{}).Submit(ctx, actor, id, 0)
 					secondResult <- err
 				} else {
 					secondResult <- svc.DeleteDraft(ctx, actor, id)

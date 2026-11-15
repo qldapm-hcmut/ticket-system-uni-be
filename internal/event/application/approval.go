@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/event/domain"
+	"github.com/qldapm-hcmut/ticket-system-uni/internal/shared/kernel"
 )
 
 type ApprovalRepository interface {
@@ -18,9 +19,22 @@ type ApprovalRepository interface {
 type ApprovalUnitOfWork interface {
 	DoApproval(context.Context, func(ApprovalRepository) error) error
 }
-type ApprovalService struct{ uow ApprovalUnitOfWork }
+type ApprovalService struct {
+	uow   ApprovalUnitOfWork
+	clock kernel.Clock
+}
 
-func NewApprovalService(u ApprovalUnitOfWork) *ApprovalService { return &ApprovalService{u} }
+func NewApprovalService(u ApprovalUnitOfWork, clock kernel.Clock) *ApprovalService {
+	return &ApprovalService{uow: u, clock: clock}
+}
+
+func (s *ApprovalService) validateSchedule(f domain.Fields) error {
+	now := s.clock.Now()
+	if err := f.Validate(now); err != nil {
+		return err
+	}
+	return f.ValidateRegistrationDeadline(now)
+}
 
 // Submit locks the event, checks organizer scope and state, then records the
 // submission and its audit entry in the same transaction.
@@ -48,6 +62,9 @@ func (s *ApprovalService) Submit(ctx context.Context, a Actor, id string, versio
 			return domain.ErrState
 		}
 
+		if err := s.validateSchedule(current.Fields); err != nil {
+			return err
+		}
 		result, err = r.Submit(ctx, id, current.Version)
 		if err != nil {
 			return err
@@ -79,6 +96,9 @@ func (s *ApprovalService) Approve(ctx context.Context, a Actor, id string, versi
 			return domain.ErrState
 		}
 
+		if err := s.validateSchedule(current.Fields); err != nil {
+			return err
+		}
 		result, err = r.Approve(ctx, id, current.Version, a.ID)
 		if err != nil {
 			return err

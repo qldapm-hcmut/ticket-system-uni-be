@@ -45,5 +45,10 @@ func (s *Service) prepareEventEdit(current domain.Event, actor Actor, version in
 	if err := edited.Fields.Validate(s.clock.Now()); err != nil {
 		return domain.Event{}, err
 	}
+	if edited.Status != "PUBLISHED" || !previous.RegistrationClosesAt.Equal(edited.RegistrationClosesAt) {
+		if err := edited.Fields.ValidateRegistrationDeadline(s.clock.Now()); err != nil {
+			return domain.Event{}, err
+		}
+	}
 	return edited, nil
 }

@@ -38,6 +38,11 @@ func TestPrepareEventEditSignificance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			current := editableEvent(start)
 			current.Status = tc.status
+			// Drafts and rejected events require a future deadline under PR #28.
+			// Keep this test focused on significance and the old-start cutoffs.
+			if tc.status != "PUBLISHED" {
+				current.RegistrationClosesAt = start.Add(-15 * time.Minute)
+			}
 			s := New(nil, editClock{start.Add(-tc.beforeStart)})
 			out, err := s.prepareEventEdit(current, Actor{ID: "organizer"}, 2, func(f domain.Fields) (domain.Fields, error) {
 				switch tc.change {

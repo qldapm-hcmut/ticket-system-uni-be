@@ -35,7 +35,11 @@ func (s *Service) Create(ctx context.Context, actor Actor, unit string, f domain
 	if !actor.IsOrganizer {
 		return domain.Event{}, domain.ErrForbidden
 	}
-	if err := f.Validate(s.clock.Now()); err != nil {
+	now := s.clock.Now()
+	if err := f.Validate(now); err != nil {
+		return domain.Event{}, err
+	}
+	if err := f.ValidateRegistrationDeadline(now); err != nil {
 		return domain.Event{}, err
 	}
 	var result domain.Event

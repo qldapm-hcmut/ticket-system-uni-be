@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/db"
@@ -63,6 +65,29 @@ func (r *Reader) Detail(ctx context.Context, raw string) (map[string]any, error)
 		return nil, mapped
 	}
 	return r.render(ctx, row)
+}
+
+func (r *Reader) MyActiveRegistration(ctx context.Context, eventID, studentID string) (*application.RegistrationRef, error) {
+	event, err := id(eventID)
+	if err != nil {
+		return nil, err
+	}
+	student, err := id(studentID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.q.GetMyActiveRegistrationRef(ctx, db.GetMyActiveRegistrationRefParams{EventID: event, StudentID: student})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	ref := &application.RegistrationRef{ID: row.ID.String(), Status: string(row.Status)}
+	if row.Status == db.RegistrationStatusWAITLISTED {
+		ref.WaitlistPosition = &row.WaitlistPosition
+	}
+	return ref, nil
 }
 func (r *Reader) Managed(ctx context.Context, actor application.Actor, f application.Filter) ([]map[string]any, int64, error) {
 	uid, err := id(actor.ID)

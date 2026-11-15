@@ -177,5 +177,6 @@ func (h *Handler) mine(c echo.Context) error {
 		item["event"] = r.Event
 		data = append(data, item)
 	}
+	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(200, map[string]any{"data": data, "meta": map[string]any{"page": page, "pageSize": size, "totalItems": total, "totalPages": (total + int64(size) - 1) / int64(size)}})
 }
