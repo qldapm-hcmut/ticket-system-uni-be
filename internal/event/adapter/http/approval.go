@@ -32,7 +32,7 @@ func (h *ApprovalHandler) submit(c echo.Context) error {
 		}
 		return failure(c, err)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"data": out})
+	return h.respondEvent(c, out.ID)
 }
 func (h *ApprovalHandler) approve(c echo.Context) error {
 	out, err := h.service.Approve(c.Request().Context(), actor(c), c.Param("id"), 0)
@@ -42,7 +42,7 @@ func (h *ApprovalHandler) approve(c echo.Context) error {
 		}
 		return failure(c, err)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"data": out})
+	return h.respondEvent(c, out.ID)
 }
 func (h *ApprovalHandler) reject(c echo.Context) error {
 	var body struct {
@@ -55,8 +55,18 @@ func (h *ApprovalHandler) reject(c echo.Context) error {
 	if err != nil {
 		return failure(c, err)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"data": out})
+	return h.respondEvent(c, out.ID)
 }
+
+// Use the same public read model as create/detail, not internal domain fields.
+func (h *ApprovalHandler) respondEvent(c echo.Context, id string) error {
+	event, err := h.reader.Detail(c.Request().Context(), id)
+	if err != nil {
+		return failure(c, err)
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": event})
+}
+
 func (h *ApprovalHandler) pending(c echo.Context) error {
 	a := actor(c)
 	if !a.IsAdmin {
