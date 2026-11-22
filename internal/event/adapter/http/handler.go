@@ -44,6 +44,8 @@ func failure(c echo.Context, err error) error {
 		return validationFailure(c, http.StatusBadRequest, err)
 	case errors.Is(err, domain.ErrNotFound):
 		status, code = 404, "NOT_FOUND"
+	case errors.Is(err, domain.ErrSelfApproval):
+		status, code = 403, "SELF_APPROVAL_NOT_ALLOWED"
 	case errors.Is(err, domain.ErrForbidden):
 		status, code = 403, "FORBIDDEN"
 	case errors.Is(err, domain.ErrCapacity):
