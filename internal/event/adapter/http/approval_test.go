@@ -128,3 +128,27 @@ func TestApprovalResponsesUseEventReadModel(t *testing.T) {
 		}
 	}
 }
+
+func TestSelfApprovalReturnsContractCode(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo := &approvalResponseRepo{event: domain.Event{ID: "event", UnitID: "unit", CreatedBy: "actor", Status: "PENDING_APPROVAL", Version: 1, Fields: domain.Fields{Title: "Test", Location: "Hall", Capacity: 2, StartAt: now.Add(48 * time.Hour), EndAt: now.Add(49 * time.Hour), RegistrationOpensAt: now.Add(-time.Hour), RegistrationClosesAt: now.Add(24 * time.Hour)}}}
+	reader := &approvalResponseReader{repo: repo}
+	e := echo.New()
+	NewApprovalHandler(a.NewApprovalService(approvalResponseUOW{repo}, patchClock{now}), reader).Register(e, func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Set("auth.profile", auth.Profile{ID: "actor", IsAdmin: true, Memberships: []auth.Membership{{}}})
+			return next(c)
+		}
+	})
+	req := httptest.NewRequest("POST", "/api/v1/events/event/approve", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	var body struct{ Error struct{ Code string } }
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 403 || body.Error.Code != "SELF_APPROVAL_NOT_ALLOWED" || repo.event.Status != "PENDING_APPROVAL" {
+		t.Fatalf("self approval: %d %s status=%s", rec.Code, rec.Body.String(), repo.event.Status)
+	}
+}

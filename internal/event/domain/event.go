@@ -8,12 +8,13 @@ import (
 )
 
 var (
-	ErrCapacity   = errors.New("capacity below registered count")
-	ErrValidation = errors.New("invalid event fields")
-	ErrNotFound   = errors.New("event not found")
-	ErrForbidden  = errors.New("organizer role required")
-	ErrVersion    = errors.New("event version conflict")
-	ErrState      = errors.New("invalid event state")
+	ErrCapacity     = errors.New("capacity below registered count")
+	ErrValidation   = errors.New("invalid event fields")
+	ErrNotFound     = errors.New("event not found")
+	ErrForbidden    = errors.New("organizer role required")
+	ErrSelfApproval = errors.New("creator cannot approve own event")
+	ErrVersion      = errors.New("event version conflict")
+	ErrState        = errors.New("invalid event state")
 )
 
 type Fields struct {

@@ -87,7 +87,7 @@ func (s *ApprovalService) Approve(ctx context.Context, a Actor, id string, versi
 			return err
 		}
 		if current.CreatedBy == a.ID {
-			return domain.ErrForbidden
+			return domain.ErrSelfApproval
 		}
 		if version != 0 && current.Version != version {
 			return domain.ErrVersion
