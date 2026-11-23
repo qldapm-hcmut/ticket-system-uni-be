@@ -17,7 +17,7 @@ Hệ thống dùng PostgreSQL và REST/JSON. Mọi bất biến nghiệp vụ đ
 | Quy tắc đã chốt (nguồn) | Hiện thực trong thiết kế |
 | --- | --- |
 | Giới hạn chỗ + waitlist, tự chuyển người đầu waitlist (Q3, Q14) | `events.registered_count <= capacity` (CHECK); promote trong cùng transaction với lệnh hủy, chọn dòng WAITLISTED có `queue_seq` nhỏ nhất |
-| Gửi email lỗi không ảnh hưởng đăng ký (Q14) | Thay đổi trạng thái và INSERT notification/outbox commit trong cùng transaction; lỗi INSERT rollback toàn bộ. Worker gửi email riêng và retry sau commit |
+| Thông báo lỗi không ảnh hưởng đăng ký (Q14) | Notification PROMOTED được INSERT trong savepoint riêng; lỗi INSERT chỉ bỏ qua thông báo (ghi log cảnh báo), lượt hủy/tăng sức chứa và việc chuyển chỗ vẫn commit. Các notification khác commit cùng transaction với thay đổi trạng thái; lỗi INSERT rollback toàn bộ. Worker gửi email riêng và retry sau commit |
 | Mỗi sinh viên 1 đăng ký còn hiệu lực; được đăng ký lại sau khi hủy (Q15) | Partial unique index `(event_id, student_id) WHERE status IN ('REGISTERED','WAITLISTED')`; đăng ký lại = dòng mới, vào cuối waitlist |
 | Tự hủy đến 24h trước giờ bắt đầu (Q13) | Hạn bình thường `start_at - 24h`; trong 24h cuối, nếu Organizer đổi thời gian/địa điểm thì các đăng ký REGISTERED hiện hữu được mở ngoại lệ tự hủy tới trước `start_at` mới; Organizer vẫn hủy hộ được |
 | Duyệt trước khi công bố, Organizer không tự duyệt (Q4, Q12) | Máy trạng thái Event; `approve` kiểm tra `approver_id <> created_by`; user có `is_admin = true` đảm nhận duyệt |
@@ -302,7 +302,7 @@ Các action ghi vào `activity_logs`. Vai trò của một user được đọc 
 | `UPDATE_USER`, `SET_UNIT_MEMBERS` | USER, UNIT | Không | `{ "before", "after" }` |
 | `GRANT_ADMIN`, `REVOKE_ADMIN` | USER | Không | `{ "ticket" }` (ghi bởi quy trình nội bộ của đội dev) |
 
-Notification được INSERT trong cùng transaction với thay đổi trạng thái, nên bản in-app luôn tồn tại; chỉ việc gửi email là bất đồng bộ và có thể FAILED mà không ảnh hưởng đăng ký (Q14).
+Notification được INSERT trong cùng transaction với thay đổi trạng thái. Riêng PROMOTED được INSERT trong savepoint: nếu lỗi thì bỏ qua thông báo, người được chuyển vẫn là đã đăng ký (Q14), nên có thể có lượt chuyển không kèm bản in-app. Việc gửi email là bất đồng bộ và có thể FAILED mà không ảnh hưởng đăng ký (Q14).
 
 ## 3. Máy trạng thái
 
@@ -710,11 +710,12 @@ SET status = 'REGISTERED', promoted_at = :decision_at, updated_at = :decision_at
 FROM head WHERE r.id = head.id
 RETURNING r.id, r.student_id;
 -- Có dòng → registered_count + 1, waitlist_count - 1,
---           INSERT notification 'PROMOTED' (INSERT lỗi thì rollback; gửi email bất đồng bộ sau commit lỗi không rollback — Q14)
+--           SAVEPOINT; INSERT notification 'PROMOTED' (INSERT lỗi thì ROLLBACK TO SAVEPOINT, vẫn hủy/promote — Q14;
+--           gửi email bất đồng bộ sau commit lỗi cũng không rollback)
 COMMIT;
 ```
 
-Mọi writer đổi status registration (kể cả worker expire) phải khóa event trước; vì vậy R2 đọc lại status sau khóa để giảm đúng counter. Khi đã chọn waitlist head mà UPDATE promote không trả dòng, đó là lỗi nội bộ, rollback chứ không bỏ qua người đầu hàng. UPDATE counter promote và INSERT SELECT audit hủy hộ đều phải tác động đúng 1 dòng; lỗi hoặc số dòng khác 1 rollback toàn bộ hủy, promote, counter, notification và audit.
+Mọi writer đổi status registration (kể cả worker expire) phải khóa event trước; vì vậy R2 đọc lại status sau khóa để giảm đúng counter. Khi đã chọn waitlist head mà UPDATE promote không trả dòng, đó là lỗi nội bộ, rollback chứ không bỏ qua người đầu hàng. UPDATE counter promote và INSERT SELECT audit hủy hộ đều phải tác động đúng 1 dòng; lỗi hoặc số dòng khác 1 rollback toàn bộ hủy, promote, counter, notification và audit. Ngoại lệ duy nhất là INSERT notification PROMOTED: lỗi chỉ bỏ qua thông báo (Q14).
 
 Với E5 tăng `capacity` thêm k chỗ, lặp bước promote tối đa k lần trong cùng transaction. `chk_capacity` là chốt chặn cuối: dù code có bug, DB vẫn từ chối mọi trạng thái vượt chỗ.
 
@@ -785,7 +786,7 @@ Mỗi mục tiêu thành công thầy đã đồng ý ở Q11 có một chốt c
 | Quy tắc khác (nguồn) | Nơi hiện thực |
 | --- | --- |
 | Hạn hủy 24h + ngoại lệ Q19 | R2, `cancelDeadline` và `cancellation_exception_until` trong registration |
-| Gửi email lỗi vẫn giữ đăng ký (Q14) | Outbox `notifications.email_status`, mục 6.3; INSERT outbox lỗi vẫn rollback transaction |
+| Thông báo lỗi vẫn giữ đăng ký (Q14) | Outbox `notifications.email_status`, mục 6.3; INSERT PROMOTED lỗi chỉ bỏ qua thông báo (savepoint), INSERT outbox khác lỗi vẫn rollback transaction |
 | Đăng ký lại sau hủy, vào cuối waitlist (Q15) | Partial index + `queue_seq` mới cho dòng mới |
 | Sửa/hủy sau công bố + notify (Q19) | E5, E7, `activity_logs` (`UPDATE_EVENT`, `CANCEL_EVENT`) |
 | Phân quyền xem dữ liệu (Q20) | Mục 6.1 |

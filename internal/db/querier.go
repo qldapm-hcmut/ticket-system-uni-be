@@ -90,9 +90,12 @@ type Querier interface {
 	LockExpiredWaitlistEvents(ctx context.Context, batchSize int32) ([]pgtype.UUID, error)
 	MarkMyNotificationsRead(ctx context.Context, arg MarkMyNotificationsReadParams) (int64, error)
 	NotifyEventChanged(ctx context.Context, eventID pgtype.UUID) (int64, error)
+	NotifyPromotedRegistrations(ctx context.Context, registrationIds []pgtype.UUID) error
 	NotifyRegistration(ctx context.Context, arg NotifyRegistrationParams) error
 	PromoteRegistration(ctx context.Context, arg PromoteRegistrationParams) (Registration, error)
-	PromoteWaitlistForCapacity(ctx context.Context, arg PromoteWaitlistForCapacityParams) (int32, error)
+	// Promotion and counters only. PROMOTED notifications are written separately
+	// so a notification failure cannot undo the promotion (Q14).
+	PromoteWaitlistForCapacity(ctx context.Context, arg PromoteWaitlistForCapacityParams) ([]pgtype.UUID, error)
 	RegisterStudent(ctx context.Context, arg RegisterStudentParams) (RegisterStudentRow, error)
 	RejectEvent(ctx context.Context, arg RejectEventParams) (Event, error)
 	RevokeAuthSession(ctx context.Context, arg RevokeAuthSessionParams) error

@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,10 +23,13 @@ type Store struct {
 
 func New(pool *pgxpool.Pool) *Store { return &Store{platform.NewTransactionRunner(pool), db.New(pool)} }
 func (s *Store) Do(ctx context.Context, fn func(context.Context, application.EventRepository) error) error {
-	return s.runner.Do(ctx, func(ctx context.Context, tx pgx.Tx) error { return fn(ctx, &repository{s.q.WithTx(tx)}) })
+	return s.runner.Do(ctx, func(ctx context.Context, tx pgx.Tx) error { return fn(ctx, &repository{q: s.q.WithTx(tx), tx: tx}) })
 }
 
-type repository struct{ q *db.Queries }
+type repository struct {
+	q  *db.Queries
+	tx pgx.Tx
+}
 
 func id(raw string) (pgtype.UUID, error) {
 	var u pgtype.UUID
@@ -164,14 +169,36 @@ func (r *repository) Update(ctx context.Context, e domain.Event) (domain.Event, 
 		updated.SignificantChange = true
 	}
 
-	// The SQL promotes FIFO waitlist entries and writes their notifications.
+	// The SQL promotes FIFO waitlist entries; notifications follow separately.
 	if old.Status == db.EventStatusPUBLISHED && f.Capacity > old.Capacity {
-		updated.PromotedCount, err = r.q.PromoteWaitlistForCapacity(ctx, db.PromoteWaitlistForCapacityParams{EventID: u, Seats: f.Capacity - old.Capacity})
+		promoted, err := r.q.PromoteWaitlistForCapacity(ctx, db.PromoteWaitlistForCapacityParams{EventID: u, Seats: f.Capacity - old.Capacity})
 		if err != nil {
 			return domain.Event{}, err
 		}
+		if err := r.notifyPromoted(ctx, u, promoted); err != nil {
+			return domain.Event{}, err
+		}
+		updated.PromotedCount = int32(len(promoted))
 		updated.RegisteredCount += updated.PromotedCount
 		updated.WaitlistCount -= updated.PromotedCount
 	}
 	return updated, nil
+}
+
+// notifyPromoted writes PROMOTED notifications in a savepoint. Q14: a failed
+// notification must not undo the promotion or the capacity change.
+func (r *repository) notifyPromoted(ctx context.Context, eventID pgtype.UUID, ids []pgtype.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	notifyErr, err := platform.InSavepoint(ctx, r.tx, func(sp pgx.Tx) error {
+		return r.q.WithTx(sp).NotifyPromotedRegistrations(ctx, ids)
+	})
+	if err != nil {
+		return fmt.Errorf("promotion notifications for event %s: %w", eventID.String(), err)
+	}
+	if notifyErr != nil {
+		slog.Warn("promotion notifications skipped", "event_id", eventID.String(), "count", len(ids), "error", notifyErr)
+	}
+	return nil
 }

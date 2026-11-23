@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const notifyPromotedRegistrations = `-- name: NotifyPromotedRegistrations :exec
+INSERT INTO notifications(user_id,event_id,type,title,body)
+SELECT student_id,event_id,'PROMOTED','Registration promoted','A seat is now available for your registration.'
+FROM registrations WHERE id = ANY($1::uuid[])
+`
+
+func (q *Queries) NotifyPromotedRegistrations(ctx context.Context, registrationIds []pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, notifyPromotedRegistrations, registrationIds)
+	return err
+}
+
 const notifyRegistration = `-- name: NotifyRegistration :exec
 INSERT INTO notifications(user_id,event_id,type,title,body)
 SELECT student_id,event_id,$1::notification_type,
@@ -35,7 +46,7 @@ func (q *Queries) NotifyRegistration(ctx context.Context, arg NotifyRegistration
 	return err
 }
 
-const promoteWaitlistForCapacity = `-- name: PromoteWaitlistForCapacity :one
+const promoteWaitlistForCapacity = `-- name: PromoteWaitlistForCapacity :many
 WITH head AS (
  SELECT r.id FROM registrations r JOIN events e ON e.id=r.event_id
  WHERE r.event_id=$1 AND r.status='WAITLISTED'
@@ -44,15 +55,12 @@ WITH head AS (
 ), promoted AS (
  UPDATE registrations r SET status='REGISTERED',promoted_at=now(),updated_at=now()
  FROM head WHERE r.id=head.id RETURNING r.id, r.event_id, r.student_id, r.status, r.queue_seq, r.promoted_at, r.cancelled_at, r.cancellation_exception_until, r.cancelled_by, r.cancelled_by_user, r.cancel_reason, r.checkin_code, r.checked_in_at, r.checkin_method, r.checked_in_by, r.checkin_note, r.created_at, r.updated_at
-), notified AS (
- INSERT INTO notifications(user_id,event_id,type,title,body)
- SELECT student_id,event_id,'PROMOTED','Registration promoted','A seat is now available for your registration.' FROM promoted
 ), counted AS (
  UPDATE events SET registered_count=registered_count+(SELECT count(*) FROM promoted),
  waitlist_count=waitlist_count-(SELECT count(*) FROM promoted),updated_at=now()
  WHERE id=$1
 )
-SELECT count(*)::integer AS promoted_count FROM promoted
+SELECT id FROM promoted
 `
 
 type PromoteWaitlistForCapacityParams struct {
@@ -60,9 +68,24 @@ type PromoteWaitlistForCapacityParams struct {
 	Seats   int32
 }
 
-func (q *Queries) PromoteWaitlistForCapacity(ctx context.Context, arg PromoteWaitlistForCapacityParams) (int32, error) {
-	row := q.db.QueryRow(ctx, promoteWaitlistForCapacity, arg.EventID, arg.Seats)
-	var promoted_count int32
-	err := row.Scan(&promoted_count)
-	return promoted_count, err
+// Promotion and counters only. PROMOTED notifications are written separately
+// so a notification failure cannot undo the promotion (Q14).
+func (q *Queries) PromoteWaitlistForCapacity(ctx context.Context, arg PromoteWaitlistForCapacityParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, promoteWaitlistForCapacity, arg.EventID, arg.Seats)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

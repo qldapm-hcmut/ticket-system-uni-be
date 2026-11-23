@@ -24,7 +24,8 @@ info:
     - Khi now >= startAt, WAITLISTED có trạng thái hiệu lực EXPIRED ngay, không promote;
       API trả EXPIRED và waitlistCount/waitlisted = 0 dù worker chưa cập nhật DB.
     - Notification/outbox được INSERT cùng transaction; INSERT lỗi rollback toàn bộ.
-      Chỉ lỗi gửi email sau commit không ảnh hưởng đăng ký/promote.
+      Riêng PROMOTED INSERT trong savepoint: lỗi thì bỏ qua thông báo, vẫn hủy/promote (Q14).
+      Lỗi gửi email sau commit không ảnh hưởng đăng ký/promote.
 servers:
   - url: http://localhost:3000/api/v1
     description: Local

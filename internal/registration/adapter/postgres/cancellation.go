@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/qldapm-hcmut/ticket-system-uni/internal/db"
+	platform "github.com/qldapm-hcmut/ticket-system-uni/internal/platform/postgres"
 	a "github.com/qldapm-hcmut/ticket-system-uni/internal/registration/application"
 )
 
@@ -198,8 +200,16 @@ func (r *repo) promoteWaitlistHead(ctx context.Context, eventID pgtype.UUID, dec
 		return nil, fmt.Errorf("promote selected waitlist head %s for event %s: %w", head.ID.String(), eventID.String(), err)
 	}
 	promoted, _ := mapReg(row, nil)
-	if err = r.notify(ctx, promoted, db.NotificationTypePROMOTED); err != nil {
-		return nil, err
+	// Q14: a failed PROMOTED notification must not undo the promotion or the
+	// cancellation that released the seat, so it runs in its own savepoint.
+	notifyErr, err := platform.InSavepoint(ctx, r.tx, func(sp pgx.Tx) error {
+		return (&repo{q: r.q.WithTx(sp), tx: sp}).notify(ctx, promoted, db.NotificationTypePROMOTED)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("promotion notification for registration %s: %w", promoted.ID, err)
+	}
+	if notifyErr != nil {
+		slog.Warn("promotion notification skipped", "registration_id", promoted.ID, "event_id", eventID.String(), "error", notifyErr)
 	}
 	n, err := r.q.IncrementPromotedCounters(ctx, eventID)
 	if err != nil {
