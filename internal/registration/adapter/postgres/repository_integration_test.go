@@ -831,7 +831,7 @@ func TestRegistrationPersistence(t *testing.T) {
 			checkQueue(e)
 		}
 	})
-	t.Run("PROMOTED notification failure rolls back cancellation", func(t *testing.T) {
+	t.Run("PROMOTED notification failure keeps cancellation and promotion (Q14)", func(t *testing.T) {
 		e := event(1, 3)
 		regs := seed(e, 3)
 		if _, err := pool.Exec(ctx, `CREATE FUNCTION reject_promoted() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.type='PROMOTED' THEN RAISE EXCEPTION 'injected promotion failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_promoted BEFORE INSERT ON notifications FOR EACH ROW EXECUTE FUNCTION reject_promoted()`); err != nil {
@@ -842,34 +842,34 @@ func TestRegistrationPersistence(t *testing.T) {
 				t.Error(err)
 			}
 		}()
-		if _, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, ""); err == nil {
-			t.Fatal("expected promotion notification failure")
+		result, err := service.Cancel(ctx, regs[0].StudentID, regs[0].ID, "")
+		if err != nil {
+			t.Fatalf("cancellation must survive a notification failure: %v", err)
 		}
-		counters(e, 1, 2)
-		checkQueue(e)
-		var status string
-		var cancelled, promoted *time.Time
-		if err := pool.QueryRow(ctx, `SELECT status,cancelled_at,promoted_at FROM registrations WHERE id=$1`, regs[0].ID).Scan(&status, &cancelled, &promoted); err != nil {
+		if result.Promoted == nil || result.Promoted.ID != regs[1].ID {
+			t.Fatalf("waitlist head not promoted: %+v", result.Promoted)
+		}
+		// checkQueue is skipped: it requires one PROMOTED notification per promotion,
+		// which Q14 deliberately relaxes here. The statuses below cover FIFO order.
+		counters(e, 1, 1)
+		for id, want := range map[string]string{regs[0].ID: "CANCELLED", regs[1].ID: "REGISTERED", regs[2].ID: "WAITLISTED"} {
+			var status string
+			if err := pool.QueryRow(ctx, `SELECT status FROM registrations WHERE id=$1`, id).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != want {
+				t.Fatalf("registration %s: status %s, want %s", id, status, want)
+			}
+		}
+		var cancelledN, promotedN int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE type='REG_CANCELLED'),count(*) FILTER (WHERE type='PROMOTED') FROM notifications WHERE event_id=$1`, e).Scan(&cancelledN, &promotedN); err != nil {
 			t.Fatal(err)
 		}
-		if status != "REGISTERED" || cancelled != nil || promoted != nil {
-			t.Fatalf("cancellation persisted: %s %v %v", status, cancelled, promoted)
-		}
-		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM registrations WHERE event_id=$1 AND promoted_at IS NOT NULL`, e).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Fatal("promotion timestamp persisted")
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE event_id=$1 AND type IN ('PROMOTED','REG_CANCELLED')`, e).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Fatal("transaction notifications persisted")
+		if cancelledN != 1 || promotedN != 0 {
+			t.Fatalf("notifications REG_CANCELLED=%d PROMOTED=%d, want 1 and 0", cancelledN, promotedN)
 		}
 	})
-	t.Run("capacity promotion FIFO and notification rollback", func(t *testing.T) {
+	t.Run("capacity promotion FIFO and notification failure", func(t *testing.T) {
 		e := event(1, 5)
 		if _, err := pool.Exec(ctx, `INSERT INTO unit_memberships(user_id,unit_id,member_role) VALUES ($1,$2,'ORGANIZER') ON CONFLICT DO NOTHING`, owner, unit); err != nil {
 			t.Fatal(err)
@@ -913,17 +913,25 @@ func TestRegistrationPersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer pool.Exec(ctx, `DROP TRIGGER reject_notification ON notifications; DROP FUNCTION reject_notification()`)
-		if err := patch(4, 2); err == nil {
-			t.Fatal("expected notification failure")
+		// Q14: a failed PROMOTED notification keeps the capacity change and promotion.
+		if err := patch(4, 2); err != nil {
+			t.Fatalf("capacity change must survive a notification failure: %v", err)
 		}
-		counters(e, 3, 1)
-		var capacity, version int
-		if err := pool.QueryRow(ctx, `SELECT capacity,version FROM events WHERE id=$1`, e).Scan(&capacity, &version); err != nil {
+		counters(e, 4, 0)
+		var capacity int
+		if err := pool.QueryRow(ctx, `SELECT capacity FROM events WHERE id=$1`, e).Scan(&capacity); err != nil {
 			t.Fatal(err)
 		}
-		if capacity != 3 || version != 2 {
-			t.Fatalf("update not rolled back: %d %d", capacity, version)
+		if capacity != 4 {
+			t.Fatalf("capacity not updated: %d", capacity)
 		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE event_id=$1 AND type='PROMOTED'`, e).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Fatalf("promoted notifications=%d, want 2 from the first increase only", n)
+		}
+		// Other notifications stay transactional: their failure still rolls back.
 		fresh := event(1, 1)
 		if _, err := service.Register(ctx, user(), fresh); err == nil {
 			t.Fatal("expected registration notification failure")
@@ -936,7 +944,7 @@ func TestRegistrationPersistence(t *testing.T) {
 		if _, err := service.Cancel(ctx, students[0], regID, ""); err == nil {
 			t.Fatal("expected cancellation notification failure")
 		}
-		counters(e, 3, 1)
+		counters(e, 4, 0)
 	})
 	t.Run("FIFO promotion and cancellation", func(t *testing.T) {
 		e := event(1, 3)
